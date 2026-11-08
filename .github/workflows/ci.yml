@@ -1,0 +1,30 @@
+# Build and JVM tests on every push/PR. Instrumented tests, measurements and test-vector
+# export need real devices (Keystore, StrongBox) and run via tools/*.sh, not here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: unit tests
+        run: ./gradlew --no-daemon :devicetrust:testDebugUnitTest
+
+      - name: no Firebase / Play Services (S2 §15 п. 1)
+        run: ./gradlew --no-daemon checkForbiddenDependencies
+
+      - name: assemble (AAR, test APKs)
+        run: ./gradlew --no-daemon :devicetrust:assembleRelease :devicetrust:assembleDebugAndroidTest :testvectors-export:assembleDebug :testvectors-export:assembleDebugAndroidTest
