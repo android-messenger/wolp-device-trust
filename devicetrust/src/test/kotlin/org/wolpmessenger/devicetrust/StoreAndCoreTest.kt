@@ -20,7 +20,10 @@ import org.wolpmessenger.devicetrust.api.UpdateKind
 import org.wolpmessenger.devicetrust.attest.Precheck
 import org.wolpmessenger.devicetrust.attest.RaspScanner
 import org.wolpmessenger.devicetrust.clock.ClockAnchor
-import org.wolpmessenger.devicetrust.clock.ClockSource
+import org.wolpmessenger.devicetrust.cert.CertManager
+import org.wolpmessenger.devicetrust.cert.Versions
+import org.wolpmessenger.devicetrust.cert.deriveState
+import kotlinx.coroutines.flow.MutableSharedFlow
 import org.wolpmessenger.devicetrust.clock.TrustClock
 import org.wolpmessenger.devicetrust.enroll.Enroller
 import org.wolpmessenger.devicetrust.keys.KeystoreKeys
@@ -70,46 +73,43 @@ class StoreAndCoreTest {
         assertNotNull(store.readChain(3))
     }
 
-    private class FixedClock(var nowMs: Long) : ClockSource {
-        override fun elapsedRealtime() = 0L
-        override fun systemEpochMs() = nowMs
-        override fun bootCount() = 1
-    }
-
     private fun core(store: TrustStore, backend: FakeBackend, now: Instant = t0): DeviceTrustCore {
         val keys = KeystoreKeys(backend)
-        val clock = TrustClock(FixedClock(now.toEpochMilli()))
+        val clock = TrustClock(MutableClock(now.toEpochMilli()))
         val config = DeviceTrustConfig(reattestGrace = 7.days)
         val precheck = Precheck(keys, FakeEnv(), MemCache(), RaspScanner { RaspReport.CLEAN }, config)
-        val enroller = Enroller(config, precheck::run, keys, GatewayClient(OkHttpClient(), okhttp3.HttpUrl.Builder().scheme("https").host("enroll.test").build(), {}),
-            store, {}, { 1 }, clock::now)
-        return DeviceTrustCore(config, store, keys, clock, precheck, enroller)
+        val gateway = GatewayClient(OkHttpClient(), okhttp3.HttpUrl.Builder().scheme("https").host("enroll.test").build(), {})
+        val enroller = Enroller(config, precheck::run, keys, gateway, store, {}, { 1 }, clock::now)
+        val certs = CertManager(config, store, keys, clock, gateway, OkHttpClient(), { OkHttpClient() }, FakeVault(), enroller,
+            { Versions(1, "2026-10-01") }, {})
+        return DeviceTrustCore(config, store, clock, precheck, enroller, certs, MutableSharedFlow())
     }
 
     @Test
     fun `TrustState is derived from the stored phase and the clock`() {
-        val c = core(TrustStore(tmp.root), FakeBackend())
+        val c = { st: StoredState, now: Instant -> deriveState(st, now, 7.days) }
         val enrolled = StoredState(phase = Phase.ENROLLED, active = active)
-        assertEquals(TrustState.Active(active.notAfter, active.renewAfter), c.derive(enrolled, t0))
-        assertEquals(TrustState.RenewalDue(active.notAfter), c.derive(enrolled, active.renewAfter))
-        assertEquals(TrustState.ExpiredGrace(active.notAfter.plusSeconds(7 * 86400)), c.derive(enrolled, active.notAfter))
-        assertEquals(TrustState.ReEnrollRequired, c.derive(enrolled, active.notAfter.plusSeconds(7 * 86400)))
-        assertEquals(TrustState.NotEnrolled, c.derive(StoredState(), t0))
-        assertEquals(TrustState.Blocked(BlockReason.REPLACED), c.derive(StoredState(phase = Phase.BLOCKED, blockReason = "REPLACED"), t0))
-        assertEquals(TrustState.Blocked(BlockReason.POLICY), c.derive(StoredState(phase = Phase.BLOCKED, blockReason = "garbage"), t0))
+        assertEquals(TrustState.Active(active.notAfter, active.renewAfter), c(enrolled, t0))
+        assertEquals(TrustState.RenewalDue(active.notAfter), c(enrolled, active.renewAfter))
+        assertEquals(TrustState.ExpiredGrace(active.notAfter.plusSeconds(7 * 86400)), c(enrolled, active.notAfter))
+        assertEquals(TrustState.ReEnrollRequired, c(enrolled, active.notAfter.plusSeconds(7 * 86400)))
+        assertEquals(TrustState.NotEnrolled, c(StoredState(), t0))
+        assertEquals(TrustState.Blocked(BlockReason.REPLACED), c(StoredState(phase = Phase.BLOCKED, blockReason = "REPLACED"), t0))
+        assertEquals(TrustState.Blocked(BlockReason.POLICY), c(StoredState(phase = Phase.BLOCKED, blockReason = "garbage"), t0))
         assertEquals(
             TrustState.UpdateRequired(UpdateKind.OS, "PATCH_TOO_OLD"),
-            c.derive(StoredState(phase = Phase.UPDATE_REQUIRED, updateRequired = UpdateRequiredInfo("OS", "PATCH_TOO_OLD", 1, "x")), t0),
+            c(StoredState(phase = Phase.UPDATE_REQUIRED, updateRequired = UpdateRequiredInfo("OS", "PATCH_TOO_OLD", 1, "x")), t0),
         )
     }
 
     @Test
-    fun `initialize cleans orphans, publishes state and credentialsVersion`() {
+    fun `initialize cleans orphans, publishes state and credentialsVersion`() = runTest {
         val store = TrustStore(tmp.root)
         val backend = FakeBackend()
-        listOf("dt.device.k1", "dt.device.k3", "dt.device.k4", "dt.precheck").forEach { backend.keys[it] = SecurityLevel.TRUSTED_ENVIRONMENT }
+        listOf("dt.device.k1", "dt.device.k3", "dt.device.k4", "dt.precheck").forEach { backend.generateSigningKey(it, null, false) }
+        store.writeChain(3, listOf(cert("plain.pem")))
         store.save(StoredState(phase = Phase.ENROLLED, active = active, credentialsVersion = 5,
-            enrolling = Enrolling("e", "dt.device.k4", byteArrayOf(), emptyList(), t0)))
+            enrolling = Enrolling("e", "dt.device.k4", byteArrayOf(), emptyList(), t0.minusSeconds(60))))
         val c = core(store, backend)
         assertEquals(TrustState.Uninitialized, c.state.value)
         c.initialize()

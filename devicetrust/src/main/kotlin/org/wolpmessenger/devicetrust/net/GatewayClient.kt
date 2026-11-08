@@ -27,12 +27,12 @@ internal sealed interface GatewayResult<out T> {
     data class Failed(val cause: IOException) : GatewayResult<Nothing>
 }
 
-/** `200` of `enroll/start` (S3 §5.1). */
-internal class EnrollStarted(val enrollmentId: String, val nonce: ByteArray, val expiresAt: Instant)
+/** `200` of `enroll/start`, `renew/challenge`, `reattest/challenge`. */
+internal class Challenge(val nonce: ByteArray, val expiresAt: Instant, val enrollmentId: String? = null)
 
-/** `200` of `enroll/finish` (S3 §5.2). Chain: leaf first. */
-internal class EnrollFinished(
-    val deviceId: String,
+/** A certificate issued by `enroll/finish`, `renew` or `reattest/finish` (S3 §5.2). Chain: leaf first. */
+internal class IssuedCert(
+    val deviceId: String?,
     val certChain: List<X509Certificate>,
     val notBefore: Instant,
     val notAfter: Instant,
@@ -40,76 +40,104 @@ internal class EnrollFinished(
 )
 
 /**
- * Gateway API client (S3 §5). [http] is the pinned client (S2 §10); every successful response's
- * `Date` header feeds [onServerDate] for TrustClock (S2 §5.2 — pinned channel only).
+ * Gateway API client (S3 §5). [pinned] is the pinned client without a client certificate
+ * (enroll host); mTLS calls take a client built for a specific key (HttpClients.mtls).
+ * Every successful response's `Date` feeds [onServerDate] (TrustClock, S2 §5.2 — pinned channel only).
  */
 internal class GatewayClient(
-    private val http: OkHttpClient,
+    private val pinned: OkHttpClient,
     private val enrollBase: HttpUrl,
     private val onServerDate: (String?) -> Unit,
+    private val appBase: HttpUrl = enrollBase,
 ) {
-    fun enrollStart(cookie: String, body: ByteArray): GatewayResult<EnrollStarted> =
-        post(enrollBase.resolve("/v1/enroll/start")!!, cookie, body) { j ->
-            EnrollStarted(j.getString("enrollmentId"), unb64.decode(j.getString("nonce")), Instant.parse(j.getString("expiresAt")))
+    // --- enroll host, Kratos session (S3 §5.1–5.2) ---
+
+    fun enrollStart(cookie: String, body: ByteArray): GatewayResult<Challenge> =
+        call(pinned, post(enrollBase, "/v1/enroll/start", body).header("Cookie", cookie)) { j ->
+            Challenge(unb64.decode(j.getString("nonce")), Instant.parse(j.getString("expiresAt")), j.getString("enrollmentId"))
         }
 
-    fun enrollFinish(cookie: String, enrollmentId: String, csr: ByteArray, chain: List<ByteArray>): GatewayResult<EnrollFinished> {
-        val body = JSONObject()
-            .put("enrollmentId", enrollmentId)
-            .put("csr", b64.encodeToString(csr))
+    fun enrollFinish(cookie: String, enrollmentId: String, csr: ByteArray, chain: List<ByteArray>): GatewayResult<IssuedCert> {
+        val body = JSONObject().put("enrollmentId", enrollmentId).put("csr", b64.encodeToString(csr))
             .put("attestationChain", JSONArray(chain.map(b64::encodeToString)))
-            .toString().toByteArray()
-        return post(enrollBase.resolve("/v1/enroll/finish")!!, cookie, body) { j ->
-            val certs = j.getJSONArray("certChain")
-            val cf = CertificateFactory.getInstance("X.509")
-            EnrollFinished(
-                deviceId = j.getString("deviceId"),
-                certChain = List(certs.length()) { i ->
-                    cf.generateCertificate(ByteArrayInputStream(unb64.decode(certs.getString(i)))) as X509Certificate
-                },
-                notBefore = Instant.parse(j.getString("notBefore")),
-                notAfter = Instant.parse(j.getString("notAfter")),
-                renewAfter = Instant.parse(j.getString("renewAfter")),
-            )
-        }
+        return call(pinned, post(enrollBase, "/v1/enroll/finish", body.bytes()).header("Cookie", cookie), ::issued)
     }
 
-    private fun <T> post(url: HttpUrl, cookie: String, body: ByteArray, parse: (JSONObject) -> T): GatewayResult<T> {
-        val request = Request.Builder()
-            .url(url)
-            .header("Cookie", cookie)
-            .post(body.toRequestBody(JSON))
-            .build()
-        return try {
-            http.newCall(request).execute().use { handle(it, parse) }
-        } catch (e: IOException) {
-            GatewayResult.Failed(e)
-        }
+    // --- app host, mTLS with the current key (S3 §5.3–5.5) ---
+
+    fun renewChallenge(mtls: OkHttpClient): GatewayResult<Challenge> =
+        call(mtls, Request.Builder().url(appBase.resolve("/v1/device/renew/challenge")!!).get(), ::challenge)
+
+    fun renew(mtls: OkHttpClient, csr: ByteArray, chain: List<ByteArray>, continuitySig: ByteArray): GatewayResult<IssuedCert> {
+        val body = JSONObject().put("csr", b64.encodeToString(csr)).put("attestationChain", JSONArray(chain.map(b64::encodeToString)))
+            .put("continuitySig", b64.encodeToString(continuitySig))
+        return call(mtls, post(appBase, "/v1/device/renew", body.bytes()), ::issued)
+    }
+
+    /** `204` → Ok(Unit). Sent with the **new** certificate. */
+    fun renewConfirm(mtls: OkHttpClient): GatewayResult<Unit> =
+        call(mtls, post(appBase, "/v1/device/renew/confirm", ByteArray(0))) { }
+
+    // --- enroll host, recovery without mTLS (S3 §5.6) ---
+
+    fun reattestChallenge(certSerialHex: String): GatewayResult<Challenge> =
+        call(pinned, post(enrollBase, "/v1/device/reattest/challenge", JSONObject().put("certSerial", certSerialHex).bytes()), ::challenge)
+
+    fun reattestFinish(certSerialHex: String, csr: ByteArray, chain: List<ByteArray>, continuitySig: ByteArray): GatewayResult<IssuedCert> {
+        val body = JSONObject().put("certSerial", certSerialHex).put("csr", b64.encodeToString(csr))
+            .put("attestationChain", JSONArray(chain.map(b64::encodeToString))).put("continuitySig", b64.encodeToString(continuitySig))
+        return call(pinned, post(enrollBase, "/v1/device/reattest/finish", body.bytes()), ::issued)
+    }
+
+    // --- plumbing ---
+
+    private fun post(base: HttpUrl, path: String, body: ByteArray) =
+        Request.Builder().url(base.resolve(path)!!).post(body.toRequestBody(JSON))
+
+    private fun <T> call(client: OkHttpClient, request: Request.Builder, parse: (JSONObject) -> T): GatewayResult<T> = try {
+        client.newCall(request.build()).execute().use { handle(it, parse) }
+    } catch (e: IOException) {
+        GatewayResult.Failed(e)
     }
 
     private fun <T> handle(response: Response, parse: (JSONObject) -> T): GatewayResult<T> {
         val text = response.body?.string()
         if (!response.isSuccessful) {
             return GatewayResult.Refused(
-                GatewayError.parse(
-                    response.code, text, response.header("X-Device-Deny"),
-                    response.header("Retry-After"), response.header("X-Request-Id"),
-                ),
+                GatewayError.parse(response.code, text, response.header("X-Device-Deny"), response.header("Retry-After"), response.header("X-Request-Id")),
             )
         }
         onServerDate(response.header("Date"))
         return try {
-            GatewayResult.Ok(parse(JSONObject(text ?: "")))
+            GatewayResult.Ok(parse(if (text.isNullOrBlank()) JSONObject() else JSONObject(text)))
         } catch (e: JSONException) {
-            GatewayResult.Failed(IOException("malformed gateway response", e))
+            malformed(e)
         } catch (e: DateTimeParseException) {
-            GatewayResult.Failed(IOException("malformed gateway response", e))
+            malformed(e)
         } catch (e: IllegalArgumentException) { // bad base64
-            GatewayResult.Failed(IOException("malformed gateway response", e))
+            malformed(e)
         } catch (e: CertificateException) {
-            GatewayResult.Failed(IOException("malformed certificate in gateway response", e))
+            malformed(e)
         }
     }
+
+    private fun malformed(e: Exception) = GatewayResult.Failed(IOException("malformed gateway response", e))
+
+    private fun challenge(j: JSONObject) = Challenge(unb64.decode(j.getString("nonce")), Instant.parse(j.getString("expiresAt")))
+
+    private fun issued(j: JSONObject): IssuedCert {
+        val certs = j.getJSONArray("certChain")
+        val cf = CertificateFactory.getInstance("X.509")
+        return IssuedCert(
+            deviceId = j.optString("deviceId").ifEmpty { null },
+            certChain = List(certs.length()) { i -> cf.generateCertificate(ByteArrayInputStream(unb64.decode(certs.getString(i)))) as X509Certificate },
+            notBefore = Instant.parse(j.getString("notBefore")),
+            notAfter = Instant.parse(j.getString("notAfter")),
+            renewAfter = Instant.parse(j.getString("renewAfter")),
+        )
+    }
+
+    private fun JSONObject.bytes() = toString().toByteArray()
 
     private companion object {
         val JSON = "application/json".toMediaType()

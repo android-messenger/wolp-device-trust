@@ -2,6 +2,7 @@ package org.wolpmessenger.devicetrust.api
 
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
@@ -28,6 +29,10 @@ public data class DeviceTrustConfig(
     /** = `DEVICES_REATTEST_GRACE` (S3): how long after `notAfter` recovery is still possible (`ExpiredGrace`). */
     val reattestGrace: Duration = 7.days,
     val httpTimeouts: Timeouts = Timeouts(),
+    /** Period of the background `RenewWorker` (S2 §6.5). */
+    val workInterval: Duration = 12.hours,
+    /** Kratos cookie for replaying a lost `enroll/finish` at start-up (S2 §6.6 п. 2a); S1 reads it from CookieManager. */
+    val cookieProvider: () -> String? = { null },
 ) {
     /** Checks what the network side needs; called by `DeviceTrust.init`. */
     public fun validateForNetwork() {
