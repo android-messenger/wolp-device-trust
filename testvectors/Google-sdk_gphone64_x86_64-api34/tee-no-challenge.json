@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "case": "tee-no-challenge",
+  "exportedAt": "2026-11-08T19:08:53.360251Z",
+  "device": {
+    "manufacturer": "Google",
+    "brand": "google",
+    "model": "sdk_gphone64_x86_64",
+    "device": "emu64xa",
+    "sdkInt": 34,
+    "release": "14",
+    "securityPatch": "2023-09-05",
+    "strongBoxFeature": false
+  },
+  "app": {
+    "packageName": "org.wolpmessenger.testvectors",
+    "versionCode": 10300,
+    "signingDigestsSha256": [
+      "743b5e2c229eadc3382e60739b162facf19c5b9d4f9c3b9323c4d0295fc39b46"
+    ]
+  },
+  "key": {
+    "requestedStrongBox": false,
+    "securityLevel": "SOFTWARE",
+    "hardwareConfirmed": false
+  },
+  "challengeB64": null,
+  "chainType": "factory",
+  "hasKeyDescription": false,
+  "chainB64": [
+    "MIIBHjCBxaADAgECAgEBMAoGCCqGSM49BAMCMA8xDTALBgNVBAMTBEZha2UwHhcNNzAwMTAxMDAwMDAwWhcNNDgwMTAxMDAwMDAwWjAPMQ0wCwYDVQQDEwRGYWtlMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExrYHj1fjD5ladYmtieIZ3Y3Rq69UnppyoO1grISHYh5dYaxNiQAeEtDGo6wJ0riTrQNJJo5+4Mmhe9i5Y4GX16MSMBAwDgYDVR0PAQH\/BAQDAgeAMAoGCCqGSM49BAMCA0gAMEUCIQDwXCpV22nvgmoqmqNz6Ik16wECozT47Yp98hmti43AfQIgKS79zIxl\/f4Hm18hii7JmrdF+c0nW\/dYxFYPXcxqTZo="
+  ]
+}
