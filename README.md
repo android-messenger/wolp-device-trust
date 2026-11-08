@@ -4,7 +4,7 @@ Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): K
 key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
 `specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
 
-## Status — stages 1–4 of S2 §14
+## Status — stages 1–5 of S2 §14
 
 | Done | Where |
 |---|---|
@@ -29,9 +29,10 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | Gateway denials on the pinned channel: `UPDATE_REQUIRED`, destructive codes → local BLOCK (intent first, everything wiped, `Blocked` event); signed alert arrives in stage 6 | `cert/CertManager.kt` |
 | Start-up reconciliation S2 §6.6: sticky BLOCK / unenrolling, `pending` switch, `enroll/finish` replay, orphans, `VaultReset`, lifting `UpdateRequired` after an update | `cert/CertManager.kt` |
 | `ensureFresh` (serialised), deadline timer, `RenewWorker` (WorkManager, network, exponential backoff) | `DeviceTrust.kt`, `cert/RenewWorker.kt` |
+| `okHttpClient()`: mTLS + pinning, certificate resolved at handshake time; on `credentialsVersion` change the pool is evicted **and** new connections use a fresh SSLContext (otherwise TLS session resumption keeps the old client identity — Conscrypt cannot invalidate client sessions); R7 built in (denial for a superseded serial → one retry on a fresh connection, HTTP/2-safe); successful responses feed the clock. `updateHttpClient()`: system CAs only. Tests run on the JVM **and** on the phone (`src/sharedTest`) | `tls/DeviceHttp.kt` |
 
-The `DeviceTrust` facade (S2 §4) grows with each stage: next are the public mTLS clients and R7
-(stage 5) and RASP, the signed alert, `onGatewayDenied` and unenroll (stage 6). Building blocks
+The `DeviceTrust` facade (S2 §4) grows with each stage: next (stage 6) are RASP, the signed
+alert, `onGatewayDenied`/ping, `checkSessionBinding` (whoami) and `unenroll`. Building blocks
 are public only behind the `@InternalDeviceTrustApi` opt-in.
 
 **Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix

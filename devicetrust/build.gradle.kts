@@ -19,6 +19,9 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = false
     }
+    // TLS tests run on the JVM (JDK provider) and on devices (Conscrypt): session caches differ.
+    sourceSets["test"].kotlin.srcDir("src/sharedTest/kotlin")
+    sourceSets["androidTest"].kotlin.srcDir("src/sharedTest/kotlin")
 }
 
 kotlin {
@@ -44,4 +47,6 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(libs.okhttp.mockwebserver)
+    androidTestImplementation(libs.okhttp.tls)
 }

@@ -33,6 +33,8 @@ import org.wolpmessenger.devicetrust.enroll.Enroller
 import org.wolpmessenger.devicetrust.keys.KeystoreKeys
 import org.wolpmessenger.devicetrust.net.GatewayClient
 import org.wolpmessenger.devicetrust.net.HttpClients
+import org.wolpmessenger.devicetrust.tls.DeviceHttp
+import okhttp3.OkHttpClient
 import org.wolpmessenger.devicetrust.store.TrustStore
 import org.wolpmessenger.devicetrust.vault.EnvelopeVault
 import java.io.File
@@ -42,8 +44,8 @@ import java.time.Instant
 /**
  * The only entry point for the application (S2 §4). Implemented so far: init (with the S2 §6.6
  * reconciliation), state, credentialsVersion, events, trustNow, precheck, enroll, ensureFresh
- * (renewal / recovery), clientCredentials, vault, deviceInfo. Gateway denials from S1,
- * unenroll, RASP, `okHttpClient()`/`updateHttpClient()` are added with stages 5–6.
+ * (renewal / recovery), clientCredentials, okHttpClient, updateHttpClient, vault, deviceInfo.
+ * Gateway denials from S1 (`onGatewayDenied`), whoami, unenroll and RASP arrive in stage 6.
  */
 public object DeviceTrust {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -54,6 +56,7 @@ public object DeviceTrust {
     @Volatile
     private var core: DeviceTrustCore? = null
     private var vaultImpl: EnvelopeVault? = null
+    private var deviceHttp: DeviceHttp? = null
 
     internal val isInitialized: Boolean get() = core != null
 
@@ -68,10 +71,10 @@ public object DeviceTrust {
         val clock = TrustClock(AndroidClockSource(app), store.load().clock)
         val vault = EnvelopeVault.android(app)
         val precheck = Precheck.android(app, config)
-        val pinned = HttpClients.pinned(config)
-        val gateway = GatewayClient(pinned, config.enrollBaseUrl.toHttpUrl(), onServerDate = { date ->
-            clock.onPinnedResponse(date)?.let { anchor -> store.update { it.copy(clock = anchor) } }
-        }, appBase = config.appBaseUrl.toHttpUrl())
+        val onServerDate: (String?) -> Unit = { date -> clock.onPinnedResponse(date)?.let { anchor -> store.update { it.copy(clock = anchor) } } }
+        val http = DeviceHttp(config, current = { core?.clientCredentials() }, onServerDate = onServerDate)
+        val pinned = http.pinned
+        val gateway = GatewayClient(pinned, config.enrollBaseUrl.toHttpUrl(), onServerDate, appBase = config.appBaseUrl.toHttpUrl())
         val versionCode = app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
         val enroller = Enroller(config, precheck::run, keys, gateway, store, { vault.provision() }, { versionCode }, clock::now)
         val certs = CertManager(
@@ -88,7 +91,10 @@ public object DeviceTrust {
         )
         val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink)
         vaultImpl = vault
+        deviceHttp = http
         core = c
+        // pooled connections stay authenticated with the old certificate (S2 §10)
+        scope.launch { c.credentialsVersion.collect { http.onCredentialsChanged() } }
         scope.launch {
             c.initialize()
             RenewWorker.schedule(app, config.workInterval)
@@ -134,6 +140,16 @@ public object DeviceTrust {
     public suspend fun ensureFresh(): TrustState = requireCore().ensureFresh()
 
     public fun clientCredentials(): ClientCredentials? = core?.clientCredentials()
+
+    /**
+     * mTLS + server-key pinning for everything except updates (S2 §10). Presents the active
+     * certificate at handshake time; R7 is built in (a denial for a superseded certificate is
+     * retried once with the current one). Successful responses feed `trustNow()`.
+     */
+    public fun okHttpClient(): OkHttpClient = checkNotNull(deviceHttp) { "DeviceTrust.init() was not called" }.client
+
+    /** System CAs only — no pinning, no client certificate. ONLY for the signed update manifest and the APK (S1 §8). */
+    public fun updateHttpClient(): OkHttpClient = checkNotNull(deviceHttp) { "DeviceTrust.init() was not called" }.update
 
     public val vault: Vault get() = checkNotNull(vaultImpl) { "DeviceTrust.init() was not called" }
 
