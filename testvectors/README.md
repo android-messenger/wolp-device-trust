@@ -1,7 +1,7 @@
 # Attestation test vectors
 
-Real Android Key Attestation chains exported by `tools/export-testvectors.sh` from each
-device of the S2 §13 matrix. Consumer: the gateway attestation verifier (S3 §6.5).
+Real Android Key Attestation chains exported from each device of the S2 §13 matrix by
+`tools/export-testvectors.sh` (or inside the sample app's "Share report" — the `testvectors` object). Consumer: the gateway attestation verifier (S3 §6.5).
 
 Layout: `testvectors/<manufacturer>-<model>-api<sdk>/<case>.json`.
 
@@ -20,7 +20,7 @@ Layout: `testvectors/<manufacturer>-<model>-api<sdk>/<case>.json`.
   "exportedAt": "2026-11-08T19:08:53Z",
   "device": { "manufacturer", "brand", "model", "device", "sdkInt", "release", "securityPatch", "strongBoxFeature" },
   "app": {                       // what S3 compares with tag 709 (attestationApplicationId)
-    "packageName": "org.wolpmessenger.testvectors",
+    "packageName": "org.wolpmessenger.devicetrust.sample",
     "versionCode": 10300,
     "signingDigestsSha256": ["<hex>"]  // debug signing key of the exporting build
   },

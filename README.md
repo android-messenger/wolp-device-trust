@@ -11,10 +11,10 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | Keystore keys: EC P-256 signing key with attestation challenge, StrongBox → TEE fallback (S2 §3), hardware-level check (`SOFTWARE`/`UNKNOWN*` rejected and deleted), alias numbering, orphan cleanup | `devicetrust/…/keys/` |
 | Attestation chain wrapper (DER for `enroll/finish`, RKP/factory label) | `devicetrust/…/attest/AttestationChain.kt` |
 | Precheck (S2 §6.1): RASP hook → Keystore level (cached per boot + app version) → patch age → screen lock as REPORT | `devicetrust/…/attest/Precheck.kt` |
-| Test-vector export for S3 | `testvectors-export/`, `tools/export-testvectors.sh`, `testvectors/` |
-| TEE vs StrongBox measurements (keygen, signature latency, concurrent signing) | `devicetrust/src/androidTest/…/KeyBenchmarkTest.kt`, `tools/bench.sh` |
+| Test-vector export for S3 | `sample/…/TestVectorExporter.kt`, `tools/export-testvectors.sh`, `testvectors/` |
+| TEE vs StrongBox measurements (keygen, signature latency, concurrent signing) | `sample/…/Diagnostics.kt`, `tools/bench.sh` |
 | Vault (S2 §9): KEK `dt.vault` in Keystore wraps only the DEK (`dt/dek.bin`, one Keystore call per process); `wrap`/`unwrap` = software AES-256-GCM with authenticated header and purpose; `KeyGone` / `Locked` / `Corrupt`; `provision`, `wipe`, partial-state detection for §6.6 | `devicetrust/…/vault/`, `api/Vault.kt` |
-| Vault measurements (DEK unwrap, wrap/unwrap 4 KiB) | `VaultDeviceTest#measure`, `tools/bench.sh` |
+| Vault measurements (DEK unwrap, wrap/unwrap 4 KiB) | `sample/…/Diagnostics.kt`, `tools/bench.sh` |
 | DER encoder + PKCS#10 CSR (empty subject, SPKI, `ecdsa-with-SHA256`), verified by OpenSSL in JVM tests and on-device with a Keystore key; CSR in every test vector | `devicetrust/…/asn1/` |
 | `TrustClock` (S2 §5.2): server `Date` from the pinned channel + `elapsedRealtime`, per-boot anchor, `trustNow()` null until known | `devicetrust/…/clock/` |
 | Gateway errors: `GatewayCode` (S3 §5.9), body `{"error",…}` with `X-Device-Deny` fallback, `Retry-After` | `api/GatewayCode.kt`, `net/GatewayError.kt` |
@@ -34,6 +34,18 @@ Keystore is software: precheck → `Unsupported(SOFTWARE_KEYSTORE)` (S2 §15 п.
 Emulator Vault numbers (software KEK, not representative): wrap/unwrap 4 KiB p95 0.22 ms, DEK unwrap p95 1.8 ms
 (targets: 1 ms / 50 ms on the matrix).
 
+## Sample app (try it on a phone)
+
+`sample/` — Compose app, no gateway needed: device facts, precheck, key attestation (TEE and
+StrongBox, chain shown), Keystore/Vault measurements against the S2 targets, and **Share report** —
+one JSON with all results plus fresh attestation test vectors, sent via the system share sheet.
+
+```bash
+./gradlew :sample:assembleDebug
+adb install -r sample/build/outputs/apk/debug/sample-debug.apk   # or copy the APK to the phone
+```
+CI also publishes the APK as the `sample-debug-apk` artifact of every run.
+
 ## Build
 
 Gradle 8.14 needs JDK 17–21 (`JAVA_HOME=/opt/jdk-21.0.2` here; the tools pick one automatically).
@@ -42,6 +54,6 @@ Gradle 8.14 needs JDK 17–21 (`JAVA_HOME=/opt/jdk-21.0.2` here; the tools pick 
 ./gradlew :devicetrust:testDebugUnitTest          # JVM tests
 ./gradlew :devicetrust:connectedDebugAndroidTest  # on a device/emulator: real Keystore
 ./gradlew checkForbiddenDependencies              # no Firebase / Play Services (S2 §15 п. 1)
-tools/bench.sh [-s serial]                        # → bench/<model>.json, bench/vault-<model>.json
+tools/bench.sh [-s serial]                        # → bench/<model>.json (Keystore + Vault)
 tools/export-testvectors.sh [-s serial]           # → testvectors/<model>/*.json
 ```

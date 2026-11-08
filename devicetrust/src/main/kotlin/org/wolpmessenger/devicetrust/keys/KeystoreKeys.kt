@@ -80,7 +80,7 @@ public class KeystoreKeys internal constructor(private val backend: KeyStoreBack
     }
 
     /**
-     * Test-vector export only (`testvectors-export`): generates in exactly the requested
+     * Test-vector export only (`sample` TestVectorExporter): generates in exactly the requested
      * environment, without fallback and **without** rejecting a software key, so negative
      * vectors (emulator, software Keystore) can be exported for S3 §6.5. The caller deletes the key.
      * Never use this on an enrollment path.

@@ -26,5 +26,12 @@ jobs:
       - name: no Firebase / Play Services (S2 §15 п. 1)
         run: ./gradlew --no-daemon checkForbiddenDependencies
 
-      - name: assemble (AAR, test APKs)
-        run: ./gradlew --no-daemon :devicetrust:assembleRelease :devicetrust:assembleDebugAndroidTest :testvectors-export:assembleDebug :testvectors-export:assembleDebugAndroidTest
+      - name: assemble (AAR, sample app, test APKs)
+        run: ./gradlew --no-daemon :devicetrust:assembleRelease :devicetrust:assembleDebugAndroidTest :sample:assembleDebug :sample:assembleDebugAndroidTest
+
+      - name: sample APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sample-debug-apk
+          path: sample/build/outputs/apk/debug/sample-debug.apk
+          retention-days: 30
