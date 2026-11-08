@@ -33,6 +33,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     testImplementation(libs.junit)
+    // real org.json for JVM tests (android.jar has only stubs)
+    testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)
 
     androidTestImplementation(libs.androidx.test.runner)

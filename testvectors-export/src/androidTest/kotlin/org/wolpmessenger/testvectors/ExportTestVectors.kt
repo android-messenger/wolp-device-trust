@@ -9,10 +9,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.wolpmessenger.devicetrust.asn1.Csr
 import org.wolpmessenger.devicetrust.attest.AttestationChain
 import org.wolpmessenger.devicetrust.keys.KeystoreKeys
 import java.io.File
+import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.PrivateKey
 import java.time.Instant
 
 /**
@@ -52,6 +55,9 @@ class ExportTestVectors {
         try {
             val key = keys.generateUnchecked(alias, challenge, c.strongBox)
             val chain = AttestationChain(key.chain)
+            // CSR signed by the attested key: S3 §5.2 п. 2 checks CSR SPKI == leaf SPKI.
+            val privateKey = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.getKey(alias, null) as PrivateKey
+            val csr = Csr.build(chain.leaf.publicKey, privateKey)
             return JSONObject()
                 .put("schema", 1)
                 .put("case", c.name)
@@ -66,6 +72,7 @@ class ExportTestVectors {
                 .put("chainType", chain.chainType.name.lowercase())
                 .put("hasKeyDescription", chain.hasKeyDescription)
                 .put("chainB64", JSONArray(chain.encoded().map(::b64)))
+                .put("csrB64", b64(csr))
         } finally {
             keys.delete(alias)
         }
