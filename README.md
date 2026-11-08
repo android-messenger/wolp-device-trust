@@ -4,7 +4,7 @@ Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): K
 key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
 `specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
 
-## Status — stages 1–2 and 3a of S2 §14
+## Status — stages 1–3 of S2 §14
 
 | Done | Where |
 |---|---|
@@ -19,9 +19,14 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | `TrustClock` (S2 §5.2): server `Date` from the pinned channel + `elapsedRealtime`, per-boot anchor, `trustNow()` null until known | `devicetrust/…/clock/` |
 | Gateway errors: `GatewayCode` (S3 §5.9), body `{"error",…}` with `X-Device-Deny` fallback, `Retry-After` | `api/GatewayCode.kt`, `net/GatewayError.kt` |
 | `enroll/start` body encoded straight to bytes — the password never becomes a `String` (S2 §6.2 п. 2) | `enroll/EnrollStartBody.kt` |
+| State store: `state.json` + `certs/<N>.pem`, atomic writes, single-lock read-modify-write | `store/TrustStore.kt` |
+| Gateway client over the pinned OkHttp client (`enroll/start`, `enroll/finish`), clock fed only by successful pinned responses | `net/GatewayClient.kt`, `net/HttpClients.kt` |
+| Enrollment S2 §6.2: precheck → start → key bound to nonce → CSR → persisted intent → finish → Vault → `ENROLLED`; every S3 §5.1–5.2 answer mapped (wrong/burned/expired password, policy vs soft rejection, `NONCE_INVALID` retry once, lost response keeps the intent for replay) | `enroll/Enroller.kt` |
+| `DeviceTrust` facade (stage-3 surface: `init`, `state`, `credentialsVersion`, `trustNow`, `precheck`, `enroll`, `clientCredentials`, `vault`, `deviceInfo`); `TrustState` derived from phase + clock | `DeviceTrust.kt`, `DeviceTrustCore.kt` |
 
-The public `DeviceTrust` facade (S2 §4) arrives with the state store (stage 3). Until then the
-building blocks are public only behind the `@InternalDeviceTrustApi` opt-in.
+The `DeviceTrust` facade (S2 §4) grows with each stage: renewal/recovery and the full init
+reconciliation (stage 4), mTLS clients (stage 5), RASP/BLOCK/unenroll (stage 6). Building blocks
+are public only behind the `@InternalDeviceTrustApi` opt-in.
 
 **Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix
 (Pixel 8+, Samsung with Knox Vault, Samsung A, a factory-chain device). On the emulator the

@@ -95,6 +95,11 @@ public class KeystoreKeys internal constructor(private val backend: KeyStoreBack
         return GeneratedKey(alias, chain, backend.securityLevel(alias), strongBoxFallback = false)
     }
 
+    /** Private key handle for signing and TLS; bytes are never exposed (S2 §4). */
+    public fun privateKey(alias: String): java.security.PrivateKey? = backend.privateKey(alias)
+
+    public fun publicKey(alias: String): java.security.PublicKey? = backend.publicKey(alias)
+
     public fun delete(alias: String) {
         backend.delete(alias)
     }
@@ -103,7 +108,10 @@ public class KeystoreKeys internal constructor(private val backend: KeyStoreBack
     public fun deviceKeyAliases(): List<String> =
         backend.aliases().filter { deviceKeyNumber(it) != null }.sortedBy { deviceKeyNumber(it) }
 
-    /** Next device alias: `dt.device.k<max+1>`, starting at `k1` (S2 §3). Numbers are never reused. */
+    /**
+     * Next device alias: `dt.device.k<max+1>` over the aliases present, starting at `k1` (S2 §3).
+     * While a key exists its number is never handed out again; after deletion it may be.
+     */
     public fun nextDeviceAlias(): String {
         val max = backend.aliases().mapNotNull(::deviceKeyNumber).maxOrNull() ?: 0
         return "$DEVICE_PREFIX${max + 1}"
