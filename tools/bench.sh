@@ -9,7 +9,7 @@ PKG=org.wolpmessenger.devicetrust.test
 cd "$ROOT"
 ./gradlew -q :devicetrust:assembleDebugAndroidTest
 $ADB install -r -t devicetrust/build/outputs/apk/androidTest/debug/devicetrust-debug-androidTest.apk >/dev/null
-$ADB shell am instrument -w -e class org.wolpmessenger.devicetrust.KeyBenchmarkTest $PKG/androidx.test.runner.AndroidJUnitRunner | tee /dev/stderr | grep -q '^OK '
+$ADB shell am instrument -w -e class org.wolpmessenger.devicetrust.KeyBenchmarkTest,org.wolpmessenger.devicetrust.VaultDeviceTest#measure $PKG/androidx.test.runner.AndroidJUnitRunner | tee /dev/stderr | grep -q '^OK '
 mkdir -p bench
 $ADB pull /sdcard/Android/data/$PKG/files/bench/. bench/ >/dev/null
 $ADB uninstall $PKG >/dev/null
