@@ -1,0 +1,63 @@
+{
+  "device": {
+    "manufacturer": "samsung",
+    "brand": "samsung",
+    "model": "SM-A376B",
+    "device": "a37x",
+    "sdkInt": 36,
+    "release": "16",
+    "securityPatch": "2026-08-05",
+    "strongBoxFeature": false
+  },
+  "keyBench": [
+    {
+      "requestedStrongBox": false,
+      "level": "TRUSTED_ENVIRONMENT",
+      "note": null,
+      "keygenMs": {
+        "n": 5,
+        "p50": 48.252266,
+        "p95": 62.522383,
+        "max": 65.404882
+      },
+      "signMs": {
+        "n": 100,
+        "p50": 4.61375,
+        "p95": 5.370743,
+        "max": 6.053359
+      },
+      "parallelSignMs": {
+        "n": 120,
+        "p50": 19.553633,
+        "p95": 51.826602,
+        "max": 61.379375,
+        "threads": 6,
+        "wallMs": 483.096328
+      }
+    }
+  ],
+  "vaultBench": {
+    "dekUnwrapMs": {
+      "n": 30,
+      "p50": 7.790234,
+      "p95": 8.676601,
+      "max": 10.448633
+    },
+    "wrap4KiBMs": {
+      "n": 500,
+      "p50": 0.088047,
+      "p95": 0.106446,
+      "max": 0.179023
+    },
+    "unwrap4KiBMs": {
+      "n": 500,
+      "p50": 0.078672,
+      "p95": 0.091758,
+      "max": 0.153203
+    },
+    "targets": {
+      "wrapUnwrapP95Ms": 1,
+      "dekUnwrapP95Ms": 50
+    }
+  }
+}
