@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "case": "tee-no-challenge",
-  "exportedAt": "2026-11-08T19:17:13.660579Z",
+  "exportedAt": "2026-11-08T19:46:54.982430Z",
   "device": {
     "manufacturer": "Google",
     "brand": "google",
@@ -13,7 +13,7 @@
     "strongBoxFeature": false
   },
   "app": {
-    "packageName": "org.wolpmessenger.testvectors",
+    "packageName": "org.wolpmessenger.devicetrust.sample",
     "versionCode": 10300,
     "signingDigestsSha256": [
       "743b5e2c229eadc3382e60739b162facf19c5b9d4f9c3b9323c4d0295fc39b46"
@@ -28,7 +28,7 @@
   "chainType": "factory",
   "hasKeyDescription": false,
   "chainB64": [
-    "MIIBHTCBxaADAgECAgEBMAoGCCqGSM49BAMCMA8xDTALBgNVBAMTBEZha2UwHhcNNzAwMTAxMDAwMDAwWhcNNDgwMTAxMDAwMDAwWjAPMQ0wCwYDVQQDEwRGYWtlMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoftjeZFFjeB3MV3tyUge63vAeAqGpGZXT3AIAB43n7lDUxdN\/JNW9R3QE3gAEinI09OlO9RzQgookjpKDMklPKMSMBAwDgYDVR0PAQH\/BAQDAgeAMAoGCCqGSM49BAMCA0cAMEQCIB26yPFXvbV0sXdwoSB1fkIfAgXWjrwBefPf\/u0H1NkwAiAxz\/Wqqix0njoesP9sC9tvPurfWtyWMKSwe+7eMmOdew=="
+    "MIIBHzCBxaADAgECAgEBMAoGCCqGSM49BAMCMA8xDTALBgNVBAMTBEZha2UwHhcNNzAwMTAxMDAwMDAwWhcNNDgwMTAxMDAwMDAwWjAPMQ0wCwYDVQQDEwRGYWtlMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJq36FJy2mrAlikE9ROtrS\/o2D17TgswRPOxdyNj4iJ3YroQoQYj4MErI0yM14WUQpJAfhiCtZMTSJqDTpQgsBKMSMBAwDgYDVR0PAQH\/BAQDAgeAMAoGCCqGSM49BAMCA0kAMEYCIQCo1OxNt1zvWpyLlMGCniW42efItvkXj5xdzTukY9HGTAIhAMJ\/CUMHnocSQMKCqUE8ll2Jwg+TrMAzjOmqVSShLzQQ"
   ],
-  "csrB64": "MIG7MGICAQAwADBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABKH7Y3mRRY3gdzFd7clIHut7wHgKhqRmV09wCAAeN5+5Q1MXTfyTVvUd0BN4ABIpyNPTpTvUc0IKKJI6SgzJJTygADAKBggqhkjOPQQDAgNJADBGAiEAx+Ifb8\/e8ikOqBL6R\/hbXIOE9iazDKwNhIOvjW6VQw8CIQDHa3TPS7PBgocc7tGGQVErChG1xz6L\/icGSWbS6sPkkQ=="
+  "csrB64": "MIG5MGICAQAwADBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABCat+hSctpqwJYpBPUTra0v6Ng9e04LMETzsXcjY+Iid2K6EKEGI+DBKyNMjNeFlEKSQH4YgrWTE0iag06UILASgADAKBggqhkjOPQQDAgNHADBEAiAyG0YZ4AuFqfHJ1ueARxvD2rUVj+Erb0kSDP4MH11RGQIgJpljps1Xv1EMvl+LPg419tf3Xn9vManEympVWI5LiL0="
 }

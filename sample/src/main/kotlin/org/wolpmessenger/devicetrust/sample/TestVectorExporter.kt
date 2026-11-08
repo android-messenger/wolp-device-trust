@@ -1,52 +1,35 @@
-package org.wolpmessenger.testvectors
+package org.wolpmessenger.devicetrust.sample
 
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Base64
-import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONArray
 import org.json.JSONObject
-import org.junit.Test
-import org.junit.runner.RunWith
 import org.wolpmessenger.devicetrust.asn1.Csr
 import org.wolpmessenger.devicetrust.attest.AttestationChain
 import org.wolpmessenger.devicetrust.keys.KeystoreKeys
-import java.io.File
-import java.security.KeyStore
 import java.security.MessageDigest
-import java.security.PrivateKey
 import java.time.Instant
 
 /**
- * Writes `files/testvectors/<model>/<case>.json` (format: testvectors/README.md).
- * Challenges are deterministic — SHA-256("wolp-testvector/<case>") — so the gateway test
- * can assert `attestationChallenge == nonce`.
+ * Attestation test vectors for the gateway tests (S2 §13, S3 §6.5; format: testvectors/README.md).
+ * Challenges are deterministic — SHA-256("wolp-testvector/<case>") — so the gateway test can
+ * assert `attestationChallenge == nonce`; every vector carries a CSR signed by the attested key.
  */
-@RunWith(AndroidJUnit4::class)
-class ExportTestVectors {
-    private val context = InstrumentationRegistry.getInstrumentation().targetContext
+class TestVectorExporter(private val context: Context) {
     private val keys = KeystoreKeys.android()
 
     private class Case(val name: String, val strongBox: Boolean, val withChallenge: Boolean)
 
-    @Test
-    fun export() {
+    /** case name → vector JSON. */
+    fun export(): Map<String, JSONObject> {
         val cases = buildList {
             add(Case("tee-challenge", strongBox = false, withChallenge = true))
             add(Case("tee-no-challenge", strongBox = false, withChallenge = false))
-            if (context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)) {
-                add(Case("strongbox-challenge", strongBox = true, withChallenge = true))
-            }
+            if (DeviceFacts.hasStrongBox(context)) add(Case("strongbox-challenge", strongBox = true, withChallenge = true))
         }
-        val dir = File(context.getExternalFilesDir("testvectors"), modelDir())
-        dir.deleteRecursively()
-        dir.mkdirs()
-        for (c in cases) {
-            val json = exportCase(c)
-            File(dir, "${c.name}.json").writeText(json.toString(2) + "\n")
-            println("DT-TESTVECTOR ${dir.name}/${c.name}.json level=${json.getJSONObject("key").getString("securityLevel")}")
-        }
+        return cases.associate { it.name to exportCase(it) }
     }
 
     private fun exportCase(c: Case): JSONObject {
@@ -55,14 +38,12 @@ class ExportTestVectors {
         try {
             val key = keys.generateUnchecked(alias, challenge, c.strongBox)
             val chain = AttestationChain(key.chain)
-            // CSR signed by the attested key: S3 §5.2 п. 2 checks CSR SPKI == leaf SPKI.
-            val privateKey = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.getKey(alias, null) as PrivateKey
-            val csr = Csr.build(chain.leaf.publicKey, privateKey)
+            val csr = Csr.build(chain.leaf.publicKey, keys.privateKey(alias)!!)
             return JSONObject()
                 .put("schema", 1)
                 .put("case", c.name)
                 .put("exportedAt", Instant.now().toString())
-                .put("device", device())
+                .put("device", DeviceFacts.json(context))
                 .put("app", app())
                 .put("key", JSONObject()
                     .put("requestedStrongBox", c.strongBox)
@@ -78,16 +59,6 @@ class ExportTestVectors {
         }
     }
 
-    private fun device() = JSONObject()
-        .put("manufacturer", Build.MANUFACTURER)
-        .put("brand", Build.BRAND)
-        .put("model", Build.MODEL)
-        .put("device", Build.DEVICE)
-        .put("sdkInt", Build.VERSION.SDK_INT)
-        .put("release", Build.VERSION.RELEASE)
-        .put("securityPatch", Build.VERSION.SECURITY_PATCH)
-        .put("strongBoxFeature", context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE))
-
     /** What S3 compares with tag 709 (attestationApplicationId). */
     private fun app(): JSONObject {
         val info = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
@@ -98,8 +69,11 @@ class ExportTestVectors {
             .put("signingDigestsSha256", JSONArray(digests))
     }
 
-    private fun modelDir() = "${Build.MANUFACTURER}-${Build.MODEL}-api${Build.VERSION.SDK_INT}".replace(Regex("[^A-Za-z0-9._-]"), "_")
     private fun sha256(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b)
     private fun b64(b: ByteArray) = Base64.encodeToString(b, Base64.NO_WRAP)
     private fun ByteArray.toHex() = joinToString("") { "%02x".format(it) }
+
+    companion object {
+        fun modelDir(): String = "${Build.MANUFACTURER}-${Build.MODEL}-api${Build.VERSION.SDK_INT}".replace(Regex("[^A-Za-z0-9._-]"), "_")
+    }
 }
