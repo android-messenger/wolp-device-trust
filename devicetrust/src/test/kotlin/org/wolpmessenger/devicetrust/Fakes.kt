@@ -24,11 +24,16 @@ internal class FakeBackend(
     var failGenerate: ((strongBox: Boolean) -> Exception?) = { null }
     var failChain: ((strongBox: Boolean) -> Exception?) = { null }
     private val strongBoxOf = mutableMapOf<String, Boolean>()
+    val pairs = mutableMapOf<String, java.security.KeyPair>()
+    val challenges = mutableMapOf<String, ByteArray?>()
 
     override fun generateSigningKey(alias: String, challenge: ByteArray?, strongBox: Boolean) {
         generated += alias to strongBox
         keys[alias] = if (strongBox) strongBoxLevel else teeLevel // half-made key exists even if we then fail
         strongBoxOf[alias] = strongBox
+        challenges[alias] = challenge
+        pairs[alias] = java.security.KeyPairGenerator.getInstance("EC")
+            .apply { initialize(java.security.spec.ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         failGenerate(strongBox)?.let { throw it }
     }
 
@@ -44,6 +49,8 @@ internal class FakeBackend(
     }
 
     override fun aliases(): List<String> = keys.keys.toList()
+    override fun privateKey(alias: String) = pairs[alias]?.takeIf { alias in keys }?.private
+    override fun publicKey(alias: String) = pairs[alias]?.takeIf { alias in keys }?.public
 }
 
 internal class FakeEnv(

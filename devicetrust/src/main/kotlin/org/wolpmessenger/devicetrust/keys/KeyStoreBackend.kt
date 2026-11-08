@@ -8,6 +8,7 @@ import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.PublicKey
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 
@@ -25,6 +26,10 @@ internal interface KeyStoreBackend {
     fun securityLevel(alias: String): SecurityLevel
     fun delete(alias: String)
     fun aliases(): List<String>
+
+    /** Handle of the private key (AndroidKeyStore: non-extractable, `encoded == null`). */
+    fun privateKey(alias: String): PrivateKey?
+    fun publicKey(alias: String): PublicKey?
 }
 
 internal class AndroidKeyStoreBackend : KeyStoreBackend {
@@ -66,6 +71,10 @@ internal class AndroidKeyStoreBackend : KeyStoreBackend {
     }
 
     override fun aliases(): List<String> = keyStore().aliases().toList()
+
+    override fun privateKey(alias: String): PrivateKey? = keyStore().getKey(alias, null) as? PrivateKey
+
+    override fun publicKey(alias: String): PublicKey? = keyStore().getCertificate(alias)?.publicKey
 
     private companion object {
         const val PROVIDER = "AndroidKeyStore"
