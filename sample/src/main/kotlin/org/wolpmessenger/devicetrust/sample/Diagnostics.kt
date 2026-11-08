@@ -117,16 +117,17 @@ class Diagnostics(private val context: Context) {
             if (strongBox && ok.key.strongBoxFallback) return KeyBench(strongBox, ok.key.level.name, "StrongBox unavailable: fell back to TEE")
             val key = keys.privateKey(alias)!!
             val data = ByteArray(32) { it.toByte() }
-            fun sign(): ByteArray = Signature.getInstance("SHA256withECDSA").run { initSign(key); update(data); sign() }
+            // Named signOnce: inside `Signature.run { ... }` a local function named like the member would shadow it and recurse.
+            fun signOnce(): ByteArray = Signature.getInstance("SHA256withECDSA").let { s -> s.initSign(key); s.update(data); s.sign() }
 
             onProgress("warm-up")
-            repeat(WARMUP) { sign() }
+            repeat(WARMUP) { signOnce() }
             onProgress("$SIGN_RUNS signatures")
-            val single = List(SIGN_RUNS) { val t = System.nanoTime(); sign(); System.nanoTime() - t }
+            val single = List(SIGN_RUNS) { val t = System.nanoTime(); signOnce(); System.nanoTime() - t }
             onProgress("$PARALLEL threads × $PER_THREAD signatures")
             val pool = Executors.newFixedThreadPool(PARALLEL)
             val t0 = System.nanoTime()
-            val parallel = List(PARALLEL) { pool.submit<List<Long>> { List(PER_THREAD) { val t = System.nanoTime(); sign(); System.nanoTime() - t } } }
+            val parallel = List(PARALLEL) { pool.submit<List<Long>> { List(PER_THREAD) { val t = System.nanoTime(); signOnce(); System.nanoTime() - t } } }
                 .flatMap { it.get() }
             val wall = (System.nanoTime() - t0) / 1e6
             pool.shutdown(); pool.awaitTermination(1, TimeUnit.MINUTES)

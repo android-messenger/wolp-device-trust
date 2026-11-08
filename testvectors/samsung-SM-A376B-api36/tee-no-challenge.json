@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "case": "tee-no-challenge",
+  "exportedAt": "2026-11-08T20:31:21.139580Z",
+  "device": {
+    "manufacturer": "samsung",
+    "brand": "samsung",
+    "model": "SM-A376B",
+    "device": "a37x",
+    "sdkInt": 36,
+    "release": "16",
+    "securityPatch": "2026-08-05",
+    "strongBoxFeature": false
+  },
+  "app": {
+    "packageName": "org.wolpmessenger.devicetrust.sample",
+    "versionCode": 10300,
+    "signingDigestsSha256": [
+      "743b5e2c229eadc3382e60739b162facf19c5b9d4f9c3b9323c4d0295fc39b46"
+    ]
+  },
+  "key": {
+    "requestedStrongBox": false,
+    "securityLevel": "TRUSTED_ENVIRONMENT",
+    "hardwareConfirmed": true
+  },
+  "challengeB64": null,
+  "chainType": "factory",
+  "hasKeyDescription": false,
+  "chainB64": [
+    "MIIBHjCBxaADAgECAgEBMAoGCCqGSM49BAMCMA8xDTALBgNVBAMTBEZha2UwHhcNNzAwMTAxMDAwMDAwWhcNNDgwMTAxMDAwMDAwWjAPMQ0wCwYDVQQDEwRGYWtlMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE1c\/FHWd1MXibugaPf6WVPI3k6Ub+ycTGsuzQKHFsCKBI4z91ct8tSqqgEuU3gv\/iB8uLd5gYFNiMTu4Qn+b4TqMSMBAwDgYDVR0PAQH\/BAQDAgeAMAoGCCqGSM49BAMCA0gAMEUCIQDWudRb32Pf8EM5gCDGvvm3UXxi4l4x8Rl5cQqFMNAtJQIgYHaqORdOv4daCsrM0qnkChRHbZfhGPkuXC4mK5XsD48="
+  ],
+  "csrB64": "MIG7MGICAQAwADBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABNXPxR1ndTF4m7oGj3+llTyN5OlG\/snExrLs0ChxbAigSOM\/dXLfLUqqoBLlN4L\/4gfLi3eYGBTYjE7uEJ\/m+E6gADAKBggqhkjOPQQDAgNJADBGAiEAzfOdCTDxPGtG75dC7GIBnfaWzE5jpNhpahGWDL4FrmECIQDIeWh31LliHHadrB\/f8W+ZKURChN4X\/M5YrJoURYxZ5g=="
+}

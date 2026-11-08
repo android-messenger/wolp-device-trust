@@ -41,10 +41,10 @@ not signed by the production key.
 
 | Directory | Level | Expected S3 verdict |
 |---|---|---|
+| `samsung-SM-A376B-api36` (Galaxy A37 5G, Exynos 1580, Android 16, patch 2026-08-05; no StrongBox) | `TRUSTED_ENVIRONMENT`; **RKP** chain of 5: leaf → `O=TEE` → Droid CA3 → Droid CA2 → **Key Attestation CA1** (the ECDSA P-384 Google root, 02.2026); KeyMint 300; RootOfTrust `Verified`, `deviceLocked=true` | **accept** with policy taken from `app` (package `org.wolpmessenger.devicetrust.sample`, debug signing digest, versionCode 10300); `tee-no-challenge` → reject (no KeyDescription / challenge mismatch) |
 | `Google-sdk_gphone64_x86_64-api34` (emulator, System image 2023-09) | `SOFTWARE`; chain to *Droid Unregistered Device CA, Google Test LLC* | **reject**: `ROOT_UNTRUSTED` (untrusted root), and `SECURITY_LEVEL_SOFTWARE` if the root check were bypassed |
 
-Hardware vectors (Pixel 8+, Samsung Knox Vault, Samsung A, a factory-chain device) are pending
-devices — see S2 §13.
+Still pending: Pixel 8+ (StrongBox), Samsung with Knox Vault (StrongBox), a factory-chain device — see S2 §13.
 
 ## `continuity/continuity-v1.json` — `continuitySig` (S3 §5.4, §5.6)
 
