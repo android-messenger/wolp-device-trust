@@ -4,7 +4,7 @@ Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): K
 key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
 `specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
 
-## Status — stages 1–2 of S2 §14
+## Status — stages 1–2 and 3a of S2 §14
 
 | Done | Where |
 |---|---|
@@ -15,6 +15,10 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | TEE vs StrongBox measurements (keygen, signature latency, concurrent signing) | `devicetrust/src/androidTest/…/KeyBenchmarkTest.kt`, `tools/bench.sh` |
 | Vault (S2 §9): KEK `dt.vault` in Keystore wraps only the DEK (`dt/dek.bin`, one Keystore call per process); `wrap`/`unwrap` = software AES-256-GCM with authenticated header and purpose; `KeyGone` / `Locked` / `Corrupt`; `provision`, `wipe`, partial-state detection for §6.6 | `devicetrust/…/vault/`, `api/Vault.kt` |
 | Vault measurements (DEK unwrap, wrap/unwrap 4 KiB) | `VaultDeviceTest#measure`, `tools/bench.sh` |
+| DER encoder + PKCS#10 CSR (empty subject, SPKI, `ecdsa-with-SHA256`), verified by OpenSSL in JVM tests and on-device with a Keystore key; CSR in every test vector | `devicetrust/…/asn1/` |
+| `TrustClock` (S2 §5.2): server `Date` from the pinned channel + `elapsedRealtime`, per-boot anchor, `trustNow()` null until known | `devicetrust/…/clock/` |
+| Gateway errors: `GatewayCode` (S3 §5.9), body `{"error",…}` with `X-Device-Deny` fallback, `Retry-After` | `api/GatewayCode.kt`, `net/GatewayError.kt` |
+| `enroll/start` body encoded straight to bytes — the password never becomes a `String` (S2 §6.2 п. 2) | `enroll/EnrollStartBody.kt` |
 
 The public `DeviceTrust` facade (S2 §4) arrives with the state store (stage 3). Until then the
 building blocks are public only behind the `@InternalDeviceTrustApi` opt-in.

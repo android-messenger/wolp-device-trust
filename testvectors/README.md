@@ -28,7 +28,8 @@ Layout: `testvectors/<manufacturer>-<model>-api<sdk>/<case>.json`.
   "challengeB64": "<base64>" | null,
   "chainType": "rkp" | "factory",     // client hint by extension presence; S3 decides by roots
   "hasKeyDescription": true,
-  "chainB64": ["<DER leaf>", "...", "<DER root>"]
+  "chainB64": ["<DER leaf>", "...", "<DER root>"],
+  "csrB64": "<DER PKCS#10>"            // signed by the attested key; SPKI == leaf SPKI (S3 §5.2 п. 2)
 }
 ```
 
