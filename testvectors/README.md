@@ -45,3 +45,12 @@ not signed by the production key.
 
 Hardware vectors (Pixel 8+, Samsung Knox Vault, Samsung A, a factory-chain device) are pending
 devices — see S2 §13.
+
+## `continuity/continuity-v1.json` — `continuitySig` (S3 §5.4, §5.6)
+
+Generated independently (Python `cryptography`) and checked by the library's JVM tests, so the
+Kotlin signer and the Go verifier agree byte for byte. Per vector: inputs (`prefix`
+`wolp-renew-v1` / `wolp-reattest-v1`, `deviceId`, `certSerialHex` — high bit set on purpose, the
+serial is encoded big-endian **without** a sign byte, `nonceB64`, `newKeySpkiB64`,
+`attestationChainB64`), the exact signed `payloadHex`, the old key `oldKeySpkiB64` and a valid
+`continuitySigB64` (DER ECDSA P-256/SHA-256).

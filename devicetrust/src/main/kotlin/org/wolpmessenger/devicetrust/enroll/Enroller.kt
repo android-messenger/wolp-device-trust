@@ -55,6 +55,17 @@ internal class Enroller(
         }
     }
 
+    /**
+     * Replays `enroll/finish` for a persisted intent after a lost response (S2 §6.6 п. 2a). The
+     * gateway returns the same certificate within `DEVICES_ENROLL_REPLAY_TTL`.
+     */
+    suspend fun replay(cookie: String): EnrollResult = mutex.withLock {
+        when (val r = finish(cookie)) {
+            is FinishOutcome.Done -> r.result
+            FinishOutcome.RetryWithNewNonce -> EnrollResult.Transient(IOException("enrollment expired; a new password is needed"), null)
+        }
+    }
+
     private suspend fun run(cookie: String, password: CharArray, nonceRetryLeft: Boolean): EnrollResult {
         val state = store.load()
         when (state.phase) {
@@ -102,7 +113,7 @@ internal class Enroller(
         }
 
         // 6. persist intent before finish (lost response → replay, S2 §6.6 п. 2a)
-        store.update { it.copy(enrolling = Enrolling(start.enrollmentId, alias, csr, key.chain.map { c -> c.encoded }, now())) }
+        store.update { it.copy(enrolling = Enrolling(start.enrollmentId!!, alias, csr, key.chain.map { c -> c.encoded }, now())) }
 
         // 7. finish
         return when (val r = finish(cookie)) {
@@ -165,7 +176,7 @@ internal class Enroller(
                 store.update {
                     it.copy(
                         phase = Phase.ENROLLED,
-                        deviceId = f.deviceId,
+                        deviceId = f.deviceId ?: it.deviceId,
                         active = ActiveCert(e.alias, f.certChain.first().serialNumber.toString(16), f.notBefore, f.notAfter, f.renewAfter),
                         enrolling = null,
                         updateRequired = null,
@@ -174,7 +185,7 @@ internal class Enroller(
                 }
                 store.deleteChainsExcept(setOf(n))
                 keys.deleteOrphans(keep = setOf(e.alias))
-                done(EnrollResult.Ok(f.deviceId))
+                done(EnrollResult.Ok(f.deviceId ?: ""))
             }
         }
     }

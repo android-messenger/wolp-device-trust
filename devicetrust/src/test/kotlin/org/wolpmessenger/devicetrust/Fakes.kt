@@ -74,3 +74,31 @@ internal class MemCache(var value: CachedKeystoreLevel? = null) : PrecheckCache 
         saves++
     }
 }
+
+/** Clock whose system time the test moves; one boot. */
+internal class MutableClock(var nowMs: Long, var elapsed: Long = 0, var boot: Int = 1) : org.wolpmessenger.devicetrust.clock.ClockSource {
+    override fun elapsedRealtime() = elapsed
+    override fun systemEpochMs() = nowMs
+    override fun bootCount() = boot
+    fun set(t: java.time.Instant) {
+        nowMs = t.toEpochMilli()
+    }
+}
+
+internal class FakeVault : org.wolpmessenger.devicetrust.cert.VaultOps {
+    var present = true
+    var wipes = 0
+    var provisions = 0
+    override suspend fun provision(): Boolean {
+        provisions++
+        val created = !present
+        present = true
+        return created
+    }
+
+    override fun keys() = if (present) org.wolpmessenger.devicetrust.vault.VaultKeys.PRESENT else org.wolpmessenger.devicetrust.vault.VaultKeys.MISSING
+    override suspend fun wipe() {
+        wipes++
+        present = false
+    }
+}

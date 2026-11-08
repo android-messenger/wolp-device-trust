@@ -23,6 +23,9 @@ internal data class ActiveCert(
     val renewAfter: Instant,
 )
 
+/** Renewed certificate received but not yet switched to (S2 §6.3 п. 5–6). Its chain is in `certs/<N>.pem`. */
+internal typealias PendingCert = ActiveCert
+
 /** Written before `enroll/finish` so a lost response can be replayed (S2 §6.2 п. 6, §6.6 п. 2a). */
 internal class Enrolling(
     val enrollmentId: String,
@@ -39,6 +42,7 @@ internal data class StoredState(
     val phase: Phase = Phase.NOT_ENROLLED,
     val deviceId: String? = null,
     val active: ActiveCert? = null,
+    val pending: PendingCert? = null,
     val enrolling: Enrolling? = null,
     val credentialsVersion: Long = 0,
     val clock: ClockAnchor? = null,
@@ -103,10 +107,8 @@ internal class TrustStore(dir: File) {
             .putOpt("deviceId", s.deviceId)
             .put("credentialsVersion", s.credentialsVersion)
             .putOpt("blockReason", s.blockReason)
-            .putOpt("active", s.active?.let {
-                JSONObject().put("alias", it.alias).put("serial", it.serialHex).put("notBefore", it.notBefore.toString())
-                    .put("notAfter", it.notAfter.toString()).put("renewAfter", it.renewAfter.toString())
-            })
+            .putOpt("active", s.active?.let(::certJson))
+            .putOpt("pending", s.pending?.let(::certJson))
             .putOpt("enrolling", s.enrolling?.let {
                 JSONObject().put("enrollmentId", it.enrollmentId).put("alias", it.alias).put("csr", b64.encodeToString(it.csr))
                     .put("chain", JSONArray(it.chain.map(b64::encodeToString))).put("createdAt", it.createdAt.toString())
@@ -118,17 +120,21 @@ internal class TrustStore(dir: File) {
                 JSONObject().put("kind", it.kind).put("reason", it.reason).put("versionCode", it.versionCode).put("securityPatch", it.securityPatch)
             })
 
+        fun certJson(c: ActiveCert): JSONObject = JSONObject().put("alias", c.alias).put("serial", c.serialHex)
+            .put("notBefore", c.notBefore.toString()).put("notAfter", c.notAfter.toString()).put("renewAfter", c.renewAfter.toString())
+
+        fun certFromJson(j: JSONObject) = ActiveCert(
+            j.getString("alias"), j.getString("serial"), Instant.parse(j.getString("notBefore")),
+            Instant.parse(j.getString("notAfter")), Instant.parse(j.getString("renewAfter")),
+        )
+
         fun fromJson(j: JSONObject): StoredState = StoredState(
             phase = Phase.valueOf(j.getString("phase")),
             deviceId = j.optString("deviceId").ifEmpty { null },
             credentialsVersion = j.optLong("credentialsVersion"),
             blockReason = j.optString("blockReason").ifEmpty { null },
-            active = j.optJSONObject("active")?.let {
-                ActiveCert(
-                    it.getString("alias"), it.getString("serial"), Instant.parse(it.getString("notBefore")),
-                    Instant.parse(it.getString("notAfter")), Instant.parse(it.getString("renewAfter")),
-                )
-            },
+            active = j.optJSONObject("active")?.let(::certFromJson),
+            pending = j.optJSONObject("pending")?.let(::certFromJson),
             enrolling = j.optJSONObject("enrolling")?.let {
                 val chain = it.getJSONArray("chain")
                 Enrolling(
