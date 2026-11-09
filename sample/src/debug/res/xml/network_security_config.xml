@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug only. The devices stand (TLS on localhost via `adb reverse`) uses a test root
+     whose name constraints allow only localhost/127.0.0.1; it is trusted for those hosts only. -->
+<network-security-config>
+    <domain-config>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <trust-anchors>
+            <certificates src="@raw/stand_root" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>
