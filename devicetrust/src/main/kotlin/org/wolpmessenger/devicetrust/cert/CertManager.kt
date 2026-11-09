@@ -92,6 +92,8 @@ internal class CertManager(
     private val integrity: suspend () -> RaspReport = { RaspReport.CLEAN },
     private val alerts: AlertSink = AlertSink.None,
 ) {
+    fun isBlocked(): Boolean = store.load().phase == Phase.BLOCKED
+
     fun state(): TrustState = deriveState(store.load(), clock.now(), config.reattestGrace)
 
     /** Brings the certificate up to date: renew when due, recover when expired (S2 §6.5). */

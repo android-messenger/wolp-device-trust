@@ -13,7 +13,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.wolpmessenger.devicetrust.DeviceTrust
-import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
+import org.wolpmessenger.devicetrust.api.DenySource
+import org.wolpmessenger.devicetrust.api.GatewayCode
 
 /**
  * Debug only: live certificate renewal against the devices stand (S3 §5.3–5.5, task 5),
@@ -41,7 +42,7 @@ class StandRenewActivity : Activity() {
         val cookie = intent.getStringExtra("cookie").orEmpty()
         say("stand enroll $url, app $appUrl")
         try {
-            DeviceTrust.init(this, DeviceTrustConfig(enrollBaseUrl = url, appBaseUrl = appUrl, serverPins = pins, cookieProvider = { cookie }))
+            DeviceTrust.init(this, standConfig(url, appUrl, pins, cookie))
         } catch (e: Exception) {
             result("INIT_FAILED ${e.javaClass.simpleName}: ${e.message}")
             return
@@ -55,6 +56,13 @@ class StandRenewActivity : Activity() {
             say("ensureFresh → $state, serial $after")
             probe(appUrl, cookie, "after")
             result(if (after != null && after != before) "RENEWED old=$before new=$after state=$state" else "NOT_RENEWED serial=$after state=$state")
+            if (intent.getBooleanExtra("unenroll", false)) {
+                // S2 §5.3 / R3 live: a destructive code "from the WebView" only triggers a pinned ping; 204 → nothing happens
+                say("webview DEVICE_REVOKED → ${DeviceTrust.onGatewayDenied(GatewayCode.DEVICE_REVOKED, DenySource.WEBVIEW)}")
+                say("session binding → ${DeviceTrust.checkSessionBinding(cookie)}")
+                // S2 §6.5a: the signed UNENROLL goes out through AlertWorker; the gateway revokes the device
+                say("UNENROLL ${DeviceTrust.unenroll()} state=${DeviceTrust.state.value}")
+            }
         }
     }
 

@@ -1,7 +1,14 @@
 package org.wolpmessenger.devicetrust
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -13,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.wolpmessenger.devicetrust.alert.AlertQueue
 import org.wolpmessenger.devicetrust.alert.AlertSender
@@ -30,7 +38,15 @@ import org.wolpmessenger.devicetrust.api.UnenrollResult
 import org.wolpmessenger.devicetrust.api.TrustEvent
 import org.wolpmessenger.devicetrust.api.TrustState
 import org.wolpmessenger.devicetrust.api.Vault
+import org.wolpmessenger.devicetrust.api.RaspReport
+import org.wolpmessenger.devicetrust.attest.FilePrecheckCache
 import org.wolpmessenger.devicetrust.attest.Precheck
+import org.wolpmessenger.devicetrust.attest.RaspScanner
+import org.wolpmessenger.devicetrust.rasp.AndroidRaspEnv
+import org.wolpmessenger.devicetrust.rasp.EffectivePolicy
+import org.wolpmessenger.devicetrust.rasp.KotlinChecks
+import org.wolpmessenger.devicetrust.rasp.NativeChecks
+import org.wolpmessenger.devicetrust.rasp.RaspEngine
 import org.wolpmessenger.devicetrust.cert.CertManager
 import org.wolpmessenger.devicetrust.cert.RenewWorker
 import org.wolpmessenger.devicetrust.cert.VaultOps
@@ -53,7 +69,7 @@ import java.time.Instant
  * The only entry point for the application (S2 §4). Implemented so far: init (with the S2 §6.6
  * reconciliation), state, credentialsVersion, events, trustNow, precheck, enroll, ensureFresh
  * (renewal / recovery), onGatewayDenied, checkSessionBinding, unenroll, clientCredentials,
- * okHttpClient, updateHttpClient, vault, deviceInfo. The RASP checks are next in stage 6.
+ * checkIntegrity (RASP), okHttpClient, updateHttpClient, vault, deviceInfo.
  */
 public object DeviceTrust {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -74,19 +90,32 @@ public object DeviceTrust {
         if (core != null) return
         config.validateForNetwork()
         val app = context.applicationContext
+        val debuggable = (app.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        require(debuggable || config.expectedSigningDigests.isNotEmpty()) { "expectedSigningDigests is required in a non-debuggable app (APK_SIGNATURE, S2 §7.1)" }
         val dir = File(app.noBackupFilesDir, "dt")
         val store = TrustStore(dir)
         val keys = KeystoreKeys.android()
         val clock = TrustClock(AndroidClockSource(app), store.load().clock)
         val vault = EnvelopeVault.android(app)
-        val precheck = Precheck.android(app, config)
+        val versionCodeEarly: Long = app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
+        val precheckCache = FilePrecheckCache(File(dir, "precheck.properties"))
+        val engine = RaspEngine(
+            KotlinChecks(AndroidRaspEnv(app) { precheckCache.load()?.level }, KotlinChecks.normalize(config.expectedSigningDigests)),
+            NativeChecks()::scan,
+            EffectivePolicy(config, debuggable, versionCodeEarly),
+        )
+        lateinit var alertsRef: Alerts
+        // every RASP pass queues its REPORT findings (rate-limited, S2 §7.4)
+        val scanner = RaspScanner { engine.scan().also { r -> if (r.reports.isNotEmpty()) alertsRef.report(r.reports) } }
+        val precheck = Precheck.android(app, config, scanner)
         val onServerDate: (String?) -> Unit = { date -> clock.onPinnedResponse(date)?.let { anchor -> store.update { it.copy(clock = anchor) } } }
         val http = DeviceHttp(config, current = { core?.clientCredentials() }, onServerDate = onServerDate)
         val pinned = http.pinned
         val gateway = GatewayClient(pinned, config.enrollBaseUrl.toHttpUrl(), onServerDate, appBase = config.appBaseUrl.toHttpUrl())
-        val versionCode = app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
+        val versionCode = versionCodeEarly
         val queue = AlertQueue(dir, config.reportRateLimit)
         val alerts = Alerts(queue, store, keys, clock::now, { versionCode }, { AlertWorker.schedule(app) })
+        alertsRef = alerts
         lateinit var certs: CertManager
         // a BLOCK finding in the precheck runs the BLOCK reaction (S2 §6.1 п. 1); enroll already holds the core lock
         val precheckReacting: suspend () -> PrecheckResult = {
@@ -104,21 +133,44 @@ public object DeviceTrust {
             enroller = enroller,
             versions = { Versions(versionCode, Build.VERSION.SECURITY_PATCH) },
             emit = { eventSink.tryEmit(it) },
+            integrity = scanner::scan,
             alerts = alerts,
         )
         val sender = AlertSender(queue, alerts, gateway, config.cookieProvider, clock::now)
-        val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink, sender, appClient = { http.client }, gateway = gateway)
+        val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink, sender, appClient = { http.client }, gateway = gateway, rasp = scanner::scan)
         vaultImpl = vault
         deviceHttp = http
         core = c
         // pooled connections stay authenticated with the old certificate (S2 §10)
         scope.launch { c.credentialsVersion.collect { http.onCredentialsChanged() } }
+        Handler(Looper.getMainLooper()).post { ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundRasp(c, config)) }
         scope.launch {
             c.initialize()
+            c.checkIntegrity()
             RenewWorker.schedule(app, config.workInterval)
             if (!queue.isEmpty()) AlertWorker.schedule(app)
             c.ensureFresh()
             deadlineTimer(c)
+        }
+    }
+
+    /** RASP when the app comes to the foreground and then every `raspIntervalForeground` while it stays there (S2 §7.2). */
+    private class ForegroundRasp(private val c: DeviceTrustCore, private val config: DeviceTrustConfig) : DefaultLifecycleObserver {
+        private var job: Job? = null
+
+        override fun onStart(owner: LifecycleOwner) {
+            job?.cancel()
+            job = scope.launch {
+                while (true) {
+                    runCatching { c.checkIntegrity() }
+                    delay(config.raspIntervalForeground.inWholeMilliseconds)
+                }
+            }
+        }
+
+        override fun onStop(owner: LifecycleOwner) {
+            job?.cancel()
+            job = null
         }
     }
 
@@ -137,6 +189,12 @@ public object DeviceTrust {
 
     private fun requireCore(): DeviceTrustCore = checkNotNull(core) { "DeviceTrust.init() was not called" }
 
+    /**
+     * Every suspend entry point is main-safe: Keystore, files and the connection pool (closing a
+     * TLS socket writes to it) never run on the caller's thread — S1 calls from `Dispatchers.Main`.
+     */
+    private suspend fun <T> io(block: suspend DeviceTrustCore.() -> T): T = requireCore().let { c -> withContext(Dispatchers.IO) { c.block() } }
+
     /** `Uninitialized` until the start-up reconciliation finishes. */
     public val state: StateFlow<TrustState> get() = core?.state ?: uninitialized.asStateFlow()
 
@@ -149,14 +207,14 @@ public object DeviceTrust {
     /** Server-relative time, or null until the first pinned response in this boot (S2 §5.2). */
     public fun trustNow(): Instant? = core?.trustNow()
 
-    public suspend fun precheck(): PrecheckResult = requireCore().precheck()
+    public suspend fun precheck(): PrecheckResult = io { precheck() }
 
     /** Enrollment with the admin-issued onboarding password (S2 §6.2). [onboardingPassword] is zeroed. */
     public suspend fun enroll(kratosCookie: String, onboardingPassword: CharArray): EnrollResult =
-        requireCore().enroll(kratosCookie, onboardingPassword)
+        io { enroll(kratosCookie, onboardingPassword) }
 
     /** Renews when due, recovers when expired (S2 §6.3–6.5); call on start, onResume and on `X-Device-Renew: 1`. */
-    public suspend fun ensureFresh(): TrustState = requireCore().ensureFresh()
+    public suspend fun ensureFresh(): TrustState = io { ensureFresh() }
 
     /**
      * A gateway denial S1 saw (S2 §5.3). [source] = `PINNED_CLIENT` (a response to [okHttpClient])
@@ -164,20 +222,27 @@ public object DeviceTrust {
      * — a code from the WebView alone never deletes keys (R3). [reason] — `UPDATE_REQUIRED` only.
      */
     public suspend fun onGatewayDenied(code: GatewayCode, source: DenySource, reason: String? = null): TrustState =
-        requireCore().onGatewayDenied(code, source, reason)
+        io { onGatewayDenied(code, source, reason) }
 
     /**
      * `GET /v1/device/whoami` over [okHttpClient] with the WebView's Kratos cookie: confirms a
      * `USER_MISMATCH` (S3 §5.8c). Only with a valid certificate (Active / RenewalDue); otherwise
      * `Failed(NO_CREDENTIALS)`. S1 never offers unenroll on `NoSession` / `Failed`.
      */
-    public suspend fun checkSessionBinding(kratosCookie: String): SessionBinding = requireCore().checkSessionBinding(kratosCookie)
+    public suspend fun checkSessionBinding(kratosCookie: String): SessionBinding = io { checkSessionBinding(kratosCookie) }
 
     /**
      * Unenroll (S2 §6.5a; not offered to users in S1 v1, D15). Always completes locally (R5): with
      * a device key a signed `UNENROLL` is queued first and delivered in the background.
      */
-    public suspend fun unenroll(): UnenrollResult = requireCore().unenroll()
+    public suspend fun unenroll(): UnenrollResult = io { unenroll() }
+
+    /**
+     * One RASP pass now (S2 §7). Runs by itself at init, on coming to the foreground and every
+     * `raspIntervalForeground` there, and before enroll / renewal / recovery. A BLOCK finding runs
+     * the BLOCK reaction (S2 §8); REPORT findings are sent rate-limited (S2 §7.4).
+     */
+    public suspend fun checkIntegrity(): RaspReport = io { checkIntegrity() }
 
     /** One pass of the alert sender (AlertWorker); returns the number of messages still waiting. */
     internal fun sendAlerts(): Int = core?.sendAlerts() ?: 0

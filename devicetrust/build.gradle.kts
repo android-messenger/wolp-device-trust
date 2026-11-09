@@ -6,11 +6,20 @@ plugins {
 android {
     namespace = "org.wolpmessenger.devicetrust"
     compileSdk = 36
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         minSdk = 33
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
+        externalNativeBuild { cmake { arguments += "-DANDROID_STL=none" } }
+    }
+    // native RASP checks (S2 §7.1, §7.5) live in ../devicetrust-native (S2 §2)
+    externalNativeBuild {
+        cmake {
+            path = file("../devicetrust-native/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -36,6 +45,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     api(libs.okhttp) // okHttpClient() is part of the public API (S2 §4)
     implementation(libs.work.runtime) // RenewWorker (S2 §6.5)
+    implementation(libs.lifecycle.process) // RASP on coming to the foreground (S2 §7.2)
 
     testImplementation(libs.junit)
     // real org.json for JVM tests (android.jar has only stubs)

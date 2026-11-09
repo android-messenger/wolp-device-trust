@@ -1,0 +1,4 @@
+# ninja log v5
+1	38	1794219716140319321	CMakeFiles/wolpdt.dir/src/sha256.c.o	5a07733c3b3d60d3
+0	64	1794219716165319717	CMakeFiles/wolpdt.dir/src/rasp.c.o	a685f90a8f0c8432
+64	78	1794219716180319954	/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/build/intermediates/cxx/RelWithDebInfo/45206fu2/obj/x86_64/libwolpdt.so	845d8df993547785

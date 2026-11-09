@@ -1,0 +1,27 @@
+{
+  "buildFiles": [
+    "/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust-native/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/wolper/Android/Sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/.cxx/Debug/t73x3x2b/armeabi-v7a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/wolper/Android/Sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/.cxx/Debug/t73x3x2b/armeabi-v7a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "wolpdt::@6890427a1f51a3e7e1df": {
+      "artifactName": "wolpdt",
+      "abi": "armeabi-v7a",
+      "output": "/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/build/intermediates/cxx/Debug/t73x3x2b/obj/armeabi-v7a/libwolpdt.so",
+      "runtimeFiles": []
+    }
+  }
+}

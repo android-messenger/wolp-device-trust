@@ -1,0 +1,19 @@
+                        -H/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust-native
+-DCMAKE_SYSTEM_NAME=Android
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+-DCMAKE_SYSTEM_VERSION=33
+-DANDROID_PLATFORM=android-33
+-DANDROID_ABI=x86_64
+-DCMAKE_ANDROID_ARCH_ABI=x86_64
+-DANDROID_NDK=/home/wolper/Android/Sdk/ndk/28.2.13676358
+-DCMAKE_ANDROID_NDK=/home/wolper/Android/Sdk/ndk/28.2.13676358
+-DCMAKE_TOOLCHAIN_FILE=/home/wolper/Android/Sdk/ndk/28.2.13676358/build/cmake/android.toolchain.cmake
+-DCMAKE_MAKE_PROGRAM=/home/wolper/Android/Sdk/cmake/3.22.1/bin/ninja
+-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/build/intermediates/cxx/Debug/t73x3x2b/obj/x86_64
+-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/build/intermediates/cxx/Debug/t73x3x2b/obj/x86_64
+-DCMAKE_BUILD_TYPE=Debug
+-B/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/.cxx/Debug/t73x3x2b/x86_64
+-GNinja
+-DANDROID_STL=none
+                        Build command args: []
+                        Version: 2
