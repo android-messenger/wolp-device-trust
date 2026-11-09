@@ -3,13 +3,18 @@ package org.wolpmessenger.devicetrust.cert
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import org.wolpmessenger.devicetrust.alert.AlertKind
+import org.wolpmessenger.devicetrust.alert.AlertSink
 import org.wolpmessenger.devicetrust.api.BlockReason
 import org.wolpmessenger.devicetrust.api.ClientCredentials
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
 import org.wolpmessenger.devicetrust.api.GatewayCode
+import org.wolpmessenger.devicetrust.api.RaspFinding
 import org.wolpmessenger.devicetrust.api.RaspReport
+import org.wolpmessenger.devicetrust.api.ServerNotice
 import org.wolpmessenger.devicetrust.api.TrustEvent
 import org.wolpmessenger.devicetrust.api.TrustState
+import org.wolpmessenger.devicetrust.api.UnenrollResult
 import org.wolpmessenger.devicetrust.api.UpdateKind
 import org.wolpmessenger.devicetrust.asn1.Csr
 import org.wolpmessenger.devicetrust.clock.TrustClock
@@ -67,12 +72,10 @@ internal fun deriveState(s: StoredState, now: Instant, reattestGrace: Duration):
 
 /**
  * Certificate lifecycle (S2 §6.3–6.6): renewal over mTLS with the current key, recovery after
- * expiry or a lost renewal response, gateway denials on the pinned channel (S2 §5.3), the local
- * BLOCK wipe (S2 §8 п. 3–5; the signed alert arrives with RASP in stage 6) and the start-up
+ * expiry or a lost renewal response, gateway denials on the pinned channel (S2 §5.3), BLOCK
+ * (S2 §8, with the signed message for RASP), unenroll (S2 §6.5a) and the start-up
  * reconciliation. Callers serialise access (one coordinator lock in DeviceTrustCore).
- *
- * Not yet here (stage 5): R7 — matching the serial actually used by a request
- * (`handshake().localCertificates`) before acting on `CERT_*` or destructive codes.
+ * R7 (the serial actually used by a request) is enforced by the HTTP client (DeviceHttp).
  */
 internal class CertManager(
     private val config: DeviceTrustConfig,
@@ -87,6 +90,7 @@ internal class CertManager(
     private val versions: () -> Versions,
     private val emit: (TrustEvent) -> Unit,
     private val integrity: suspend () -> RaspReport = { RaspReport.CLEAN },
+    private val alerts: AlertSink = AlertSink.None,
 ) {
     fun state(): TrustState = deriveState(store.load(), clock.now(), config.reattestGrace)
 
@@ -106,7 +110,7 @@ internal class CertManager(
 
     private suspend fun renew(s: StoredState, nonceRetryLeft: Boolean) {
         val active = s.active ?: return
-        if (integrity().blocking.isNotEmpty()) return block(BlockReason.RASP)
+        integrity().blocking.takeIf { it.isNotEmpty() }?.let { return raspBlock(it) }
         val oldCreds = credentials(active) ?: return markReEnrollRequired()
         val oldClient = mtlsFor(oldCreds)
 
@@ -134,7 +138,7 @@ internal class CertManager(
     /** Expired certificate within grace, or a lost renewal response (`CERT_SUPERSEDED`). */
     private suspend fun recover(s: StoredState) {
         val active = s.active ?: return
-        if (integrity().blocking.isNotEmpty()) return block(BlockReason.RASP)
+        integrity().blocking.takeIf { it.isNotEmpty() }?.let { return raspBlock(it) }
         if (keys.privateKey(active.alias) == null) return markReEnrollRequired()
 
         val challenge = when (val r = io { gateway.reattestChallenge(active.serialHex) }) {
@@ -261,11 +265,41 @@ internal class CertManager(
 
     // ---------------------------------------------------------------- BLOCK (S2 §8, R1, R6)
 
-    /** Records the intent first, then destroys everything; safe to repeat. */
+    /**
+     * RASP BLOCK, the full S2 §8 order: the message is built and **signed while the key still
+     * exists** and persisted (п. 1–3), then the intent (п. 4), the wipe (п. 5), the event (п. 6),
+     * and the sender is kicked (п. 7).
+     */
+    suspend fun raspBlock(findings: List<RaspFinding>) {
+        if (store.load().phase != Phase.BLOCKED) alerts.enqueue(AlertKind.BLOCK, findings)
+        block(BlockReason.RASP)
+        alerts.schedule()
+    }
+
+    /** Records the intent first, then destroys everything; safe to repeat. No message (S2 §8, last paragraph). */
     suspend fun block(reason: BlockReason) {
         store.update { it.copy(phase = Phase.BLOCKED, blockReason = reason.name) }
         wipeEverything()
         emit(TrustEvent.Blocked(reason))
+    }
+
+    // ---------------------------------------------------------------- unenroll (S2 §6.5a, R5, R6)
+
+    /**
+     * Always completes locally. With a device key the signed `UNENROLL` is queued **before** the
+     * keys go (it is delivered later, also from the queue after the wipe); the intent
+     * `UNENROLLING` makes an interrupted wipe finish on the next start.
+     */
+    suspend fun unenroll(): UnenrollResult {
+        val s = store.load()
+        if (s.phase == Phase.BLOCKED) return UnenrollResult.Ok(ServerNotice.NOT_NEEDED)
+        val hasKey = s.active != null && keys.privateKey(s.active.alias) != null
+        val notice = if (hasKey && alerts.enqueue(AlertKind.UNENROLL)) ServerNotice.PENDING else ServerNotice.NOT_NEEDED
+        store.update { it.copy(phase = Phase.UNENROLLING) }
+        wipeEverything()
+        store.update { it.copy(phase = Phase.NOT_ENROLLED, deviceId = null, updateRequired = null, blockReason = null) }
+        if (notice == ServerNotice.PENDING) alerts.schedule()
+        return UnenrollResult.Ok(notice)
     }
 
     private suspend fun wipeEverything() {

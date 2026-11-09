@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.wolpmessenger.devicetrust.alert.AlertSender
 import org.wolpmessenger.devicetrust.api.ClientCredentials
 import org.wolpmessenger.devicetrust.api.DeviceSecurityInfo
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
@@ -15,6 +16,7 @@ import org.wolpmessenger.devicetrust.api.EnrollResult
 import org.wolpmessenger.devicetrust.api.PrecheckResult
 import org.wolpmessenger.devicetrust.api.TrustEvent
 import org.wolpmessenger.devicetrust.api.TrustState
+import org.wolpmessenger.devicetrust.api.UnenrollResult
 import org.wolpmessenger.devicetrust.attest.Precheck
 import org.wolpmessenger.devicetrust.cert.CertManager
 import org.wolpmessenger.devicetrust.cert.deriveState
@@ -38,6 +40,7 @@ internal class DeviceTrustCore(
     private val enroller: Enroller,
     private val certs: CertManager,
     private val events: MutableSharedFlow<TrustEvent>,
+    private val sender: AlertSender? = null,
 ) {
     private val lock = Mutex()
     private val _state = MutableStateFlow<TrustState>(TrustState.Uninitialized)
@@ -63,13 +66,25 @@ internal class DeviceTrustCore(
         enroller.enroll(cookie, password).also { publish() }
     }
 
+    /** Precheck (S2 §6.1); a BLOCK finding runs the BLOCK reaction (S2 §8) before returning. */
     suspend fun precheck(): PrecheckResult = precheck.run().also {
         when (it) {
             is PrecheckResult.Supported -> lastInfo = it.info
             is PrecheckResult.Unsupported -> lastInfo = it.info
-            is PrecheckResult.Compromised -> Unit
+            is PrecheckResult.Compromised -> lock.withLock {
+                certs.raspBlock(it.report.blocking)
+                publish()
+            }
         }
     }
+
+    /** S2 §6.5a: completes locally in every state (R5). */
+    suspend fun unenroll(): UnenrollResult = lock.withLock {
+        certs.unenroll().also { publish() }
+    }
+
+    /** One pass of the alert sender; returns the number of messages still waiting. */
+    fun sendAlerts(): Int = sender?.sendAll() ?: 0
 
     fun trustNow(): Instant? = clock.trustNow()
 

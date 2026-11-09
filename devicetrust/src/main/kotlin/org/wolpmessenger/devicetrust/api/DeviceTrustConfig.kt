@@ -6,12 +6,22 @@ import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
+/** REPORT rate limits (S2 §7.4). */
+public data class ReportLimit(
+    /** One message per (check id, detail) per window. */
+    val perCheckWindow: Duration = 24.hours,
+    /** Findings per REPORT message. */
+    val batch: Int = 20,
+    /** Pending findings kept; the oldest are dropped beyond it. */
+    val queue: Int = 100,
+)
+
 /** HTTP timeouts of the gateway client (S2 §12). */
 public data class Timeouts(val connect: Duration = 10.seconds, val read: Duration = 20.seconds)
 
 /**
- * Library configuration (S2 §12). Fields of later stages (RASP policy, work interval,
- * build kind, report limits…) are added with those stages.
+ * Library configuration (S2 §12). The RASP fields (policy, build kind, dry run…) arrive with
+ * the RASP checks.
  */
 public data class DeviceTrustConfig(
     /** `https://enroll.<host>` — enrollment and recovery (S3 §5.1–5.2, §5.6). */
@@ -33,6 +43,8 @@ public data class DeviceTrustConfig(
     val workInterval: Duration = 12.hours,
     /** Kratos cookie for replaying a lost `enroll/finish` at start-up (S2 §6.6 п. 2a); S1 reads it from CookieManager. */
     val cookieProvider: () -> String? = { null },
+    /** REPORT rate limits (S2 §7.4). */
+    val reportRateLimit: ReportLimit = ReportLimit(),
 ) {
     /** Checks what the network side needs; called by `DeviceTrust.init`. */
     public fun validateForNetwork() {
