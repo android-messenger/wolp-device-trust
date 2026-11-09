@@ -30,6 +30,9 @@ internal sealed interface GatewayResult<out T> {
 /** `200` of `enroll/start`, `renew/challenge`, `reattest/challenge`. */
 internal class Challenge(val nonce: ByteArray, val expiresAt: Instant, val enrollmentId: String? = null)
 
+/** `200` of `whoami` (S3 §5.8c). */
+internal class Whoami(val deviceId: String, val session: String)
+
 /** A certificate issued by `enroll/finish`, `renew` or `reattest/finish` (S3 §5.2). Chain: leaf first. */
 internal class IssuedCert(
     val deviceId: String?,
@@ -95,18 +98,33 @@ internal class GatewayClient(
     fun alert(body: ByteArray, cookie: String?): GatewayResult<Unit> =
         call(pinned, post(enrollBase, "/v1/device/alert", body).apply { cookie?.let { header("Cookie", it) } }) { }
 
+    // --- app host, mTLS with the current certificate: DeviceTrust.okHttpClient() (S3 §5.8a, §5.8c) ---
+
+    /** `204` → Ok(true if `X-Device-Renew: 1`). No Kratos session needed. */
+    fun ping(app: OkHttpClient): GatewayResult<Boolean> =
+        call(app, Request.Builder().url(appBase.resolve("/v1/device/ping")!!).get()) { _, r -> r.header("X-Device-Renew")?.trim() == "1" }
+
+    /** `200 {"deviceId","session":"none|match|mismatch"}`. */
+    fun whoami(app: OkHttpClient, cookie: String): GatewayResult<Whoami> =
+        call(app, Request.Builder().url(appBase.resolve("/v1/device/whoami")!!).get().header("Cookie", cookie)) { j, _ ->
+            Whoami(j.getString("deviceId"), j.getString("session"))
+        }
+
     // --- plumbing ---
 
     private fun post(base: HttpUrl, path: String, body: ByteArray) =
         Request.Builder().url(base.resolve(path)!!).post(body.toRequestBody(JSON))
 
-    private fun <T> call(client: OkHttpClient, request: Request.Builder, parse: (JSONObject) -> T): GatewayResult<T> = try {
+    private fun <T> call(client: OkHttpClient, request: Request.Builder, parse: (JSONObject) -> T): GatewayResult<T> =
+        call(client, request) { j, _ -> parse(j) }
+
+    private fun <T> call(client: OkHttpClient, request: Request.Builder, parse: (JSONObject, Response) -> T): GatewayResult<T> = try {
         client.newCall(request.build()).execute().use { handle(it, parse) }
     } catch (e: IOException) {
         GatewayResult.Failed(e)
     }
 
-    private fun <T> handle(response: Response, parse: (JSONObject) -> T): GatewayResult<T> {
+    private fun <T> handle(response: Response, parse: (JSONObject, Response) -> T): GatewayResult<T> {
         val text = response.body?.string()
         if (!response.isSuccessful) {
             return GatewayResult.Refused(
@@ -115,7 +133,7 @@ internal class GatewayClient(
         }
         onServerDate(response.header("Date"))
         return try {
-            GatewayResult.Ok(parse(if (text.isNullOrBlank()) JSONObject() else JSONObject(text)))
+            GatewayResult.Ok(parse(if (text.isNullOrBlank()) JSONObject() else JSONObject(text), response))
         } catch (e: JSONException) {
             malformed(e)
         } catch (e: DateTimeParseException) {

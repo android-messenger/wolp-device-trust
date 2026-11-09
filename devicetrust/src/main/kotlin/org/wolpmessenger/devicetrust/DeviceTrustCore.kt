@@ -9,7 +9,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.wolpmessenger.devicetrust.alert.AlertSender
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import org.wolpmessenger.devicetrust.api.BindingFailure
 import org.wolpmessenger.devicetrust.api.ClientCredentials
+import org.wolpmessenger.devicetrust.api.DenySource
+import org.wolpmessenger.devicetrust.api.GatewayCode
+import org.wolpmessenger.devicetrust.api.SessionBinding
 import org.wolpmessenger.devicetrust.api.DeviceSecurityInfo
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
 import org.wolpmessenger.devicetrust.api.EnrollResult
@@ -22,6 +29,8 @@ import org.wolpmessenger.devicetrust.cert.CertManager
 import org.wolpmessenger.devicetrust.cert.deriveState
 import org.wolpmessenger.devicetrust.clock.TrustClock
 import org.wolpmessenger.devicetrust.enroll.Enroller
+import org.wolpmessenger.devicetrust.net.GatewayClient
+import org.wolpmessenger.devicetrust.net.GatewayResult
 import org.wolpmessenger.devicetrust.store.Phase
 import org.wolpmessenger.devicetrust.store.TrustStore
 import java.time.Instant
@@ -41,7 +50,15 @@ internal class DeviceTrustCore(
     private val certs: CertManager,
     private val events: MutableSharedFlow<TrustEvent>,
     private val sender: AlertSender? = null,
+    /** `DeviceTrust.okHttpClient()`: mTLS with the current certificate, pinning, R7. */
+    private val appClient: () -> OkHttpClient = { OkHttpClient() },
+    private val gateway: GatewayClient? = null,
+    /** Monotonic milliseconds, for the WEBVIEW check rate limit. */
+    private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
+    private val checkLock = Mutex()
+    private var lastCheckMs: Long? = null
+
     private val lock = Mutex()
     private val _state = MutableStateFlow<TrustState>(TrustState.Uninitialized)
     private val _credentialsVersion = MutableStateFlow(0L)
@@ -83,6 +100,80 @@ internal class DeviceTrustCore(
         certs.unenroll().also { publish() }
     }
 
+    // ---------------------------------------------------------------- gateway denials (S2 §5.3, R3)
+
+    /**
+     * PINNED: acted upon (R7 is already applied by the pinned client). WEBVIEW: never destructive
+     * by itself — at most once per 30 s a `GET /v1/device/ping` over the pinned channel decides,
+     * and the action follows the code of **that** answer. A ping that fails (network, pinning
+     * failure = possibly a fake server) changes nothing.
+     */
+    suspend fun onGatewayDenied(code: GatewayCode, source: DenySource, reason: String? = null): TrustState {
+        if (source == DenySource.PINNED_CLIENT) {
+            lock.withLock {
+                certs.onPinnedDenial(code, reason)
+                publish()
+            }
+            return state.value
+        }
+        when (code) {
+            GatewayCode.NO_SESSION, GatewayCode.USER_MISMATCH, GatewayCode.RATE_LIMITED, GatewayCode.UNKNOWN -> return state.value
+            GatewayCode.UPDATE_REQUIRED -> Journal.event("webview_update_required", "check never sends it") // suspicious; ping decides
+            else -> Unit
+        }
+        checkLock.withLock {
+            val now = monotonicMs()
+            lastCheckMs?.let { if (now - it < WEBVIEW_CHECK_INTERVAL_MS) return state.value }
+            lastCheckMs = now
+            verifyByPing(code)
+        }
+        return state.value
+    }
+
+    private suspend fun verifyByPing(webviewCode: GatewayCode) {
+        val gw = gateway ?: return
+        if (clientCredentials() == null) {
+            // no valid certificate to ping with: bring it up to date instead (renew / recover)
+            ensureFresh()
+            return
+        }
+        when (val r = withContext(Dispatchers.IO) { gw.ping(appClient()) }) {
+            is GatewayResult.Ok -> {
+                if (certs.isDestructive(webviewCode) || webviewCode == GatewayCode.UPDATE_REQUIRED) {
+                    Journal.event("deny_unconfirmed", webviewCode.name)
+                }
+                if (r.value) ensureFresh()
+            }
+            is GatewayResult.Refused -> lock.withLock {
+                Journal.event("deny_confirmed", "${webviewCode.name} -> ${r.error.code.name}")
+                certs.onPinnedDenial(r.error.code, r.error.reason)
+                publish()
+            }
+            is GatewayResult.Failed -> Journal.event("deny_check_failed", webviewCode.name)
+        }
+    }
+
+    /** `GET /v1/device/whoami` with mTLS + the WebView's Kratos cookie (S2 §4, S3 §5.8c). */
+    suspend fun checkSessionBinding(cookie: String): SessionBinding {
+        val gw = gateway ?: return SessionBinding.Failed(BindingFailure.NO_CREDENTIALS)
+        if (clientCredentials() == null) return SessionBinding.Failed(BindingFailure.NO_CREDENTIALS)
+        return when (val r = withContext(Dispatchers.IO) { gw.whoami(appClient(), cookie) }) {
+            is GatewayResult.Ok -> when (r.value.session) {
+                "match" -> SessionBinding.Match
+                "mismatch" -> SessionBinding.Mismatch.also { Journal.event("user_mismatch_confirmed") }
+                else -> SessionBinding.NoSession
+            }
+            is GatewayResult.Refused -> {
+                lock.withLock {
+                    certs.onPinnedDenial(r.error.code, r.error.reason)
+                    publish()
+                }
+                SessionBinding.Failed(BindingFailure.DENIED, r.error.code)
+            }
+            is GatewayResult.Failed -> SessionBinding.Failed(BindingFailure.NETWORK)
+        }
+    }
+
     /** One pass of the alert sender; returns the number of messages still waiting. */
     fun sendAlerts(): Int = sender?.sendAll() ?: 0
 
@@ -105,6 +196,10 @@ internal class DeviceTrustCore(
         val a = s.active?.takeIf { s.phase == Phase.ENROLLED } ?: return null
         val now = clock.now()
         return listOf(a.renewAfter, a.notAfter, a.notAfter.plusSeconds(config.reattestGrace.inWholeSeconds)).firstOrNull { it > now }
+    }
+
+    private companion object {
+        const val WEBVIEW_CHECK_INTERVAL_MS = 30_000L
     }
 
     /** Re-reads the store and recomputes the state by the clock. */

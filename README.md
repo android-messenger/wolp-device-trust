@@ -28,13 +28,16 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | `continuitySig` (S3 §5.4) checked against independent vectors shared with the gateway | `cert/ContinuitySig.kt`, `testvectors/continuity/` |
 | Gateway denials on the pinned channel: `UPDATE_REQUIRED`, destructive codes → local BLOCK (intent first, everything wiped, `Blocked` event; no message, S2 §8) | `cert/CertManager.kt` |
 | Alerts (S2 §8, §7.4, S3 §5.7): RASP BLOCK in the strict order (message signed by the current key **before** the wipe → persisted → intent → wipe → event → sender); unsigned before enrollment, sent with the Kratos cookie read at send time; REPORT rate limit per (id, detail) per 24 h, batches of 20, queue of 100; `AlertWorker` (WorkManager, network, backoff, 7-day lifetime; `400` dropped) | `alert/` |
+| `onGatewayDenied(code, source)` (S2 §5.3, R3): `PINNED_CLIENT` acted upon (R7 already applied by the client); `WEBVIEW` only triggers `GET /v1/device/ping` over the pinned channel (≤ 1 per 30 s) and the action follows the ping's code; a failed ping (network, pinning) deletes nothing — tested over real TLS with a fake server whose CA is trusted but whose key is not pinned (S2 §15 п. 7) | `DeviceTrustCore.kt`, `cert/CertManager.kt` |
+| `checkSessionBinding(cookie)` → `GET /v1/device/whoami` (S3 §5.8c): `Match` / `Mismatch` / `NoSession` / `Failed(NO_CREDENTIALS\|NETWORK\|DENIED)` | `DeviceTrustCore.kt`, `api/SessionBinding.kt` |
+| Instrumented: full mTLS handshake (TLS 1.3 and 1.2) with a **Keystore** key through `DeviceHttp` against a client-auth server — fails without `DIGEST_NONE` (verified on the A37) | `androidTest/…/KeystoreMtlsDeviceTest.kt` |
 | `unenroll()` (S2 §6.5a): signed `UNENROLL` queued first (only with a key), intent `UNENROLLING`, everything wiped, `NotEnrolled`; completes in every state (R5) | `cert/CertManager.kt` |
 | Start-up reconciliation S2 §6.6: sticky BLOCK / unenrolling, `pending` switch, `enroll/finish` replay, orphans, `VaultReset`, lifting `UpdateRequired` after an update | `cert/CertManager.kt` |
 | `ensureFresh` (serialised), deadline timer, `RenewWorker` (WorkManager, network, exponential backoff) | `DeviceTrust.kt`, `cert/RenewWorker.kt` |
 | `okHttpClient()`: mTLS + pinning, certificate resolved at handshake time; on `credentialsVersion` change the pool is evicted **and** new connections use a fresh SSLContext (otherwise TLS session resumption keeps the old client identity — Conscrypt cannot invalidate client sessions); R7 built in (denial for a superseded serial → one retry on a fresh connection, HTTP/2-safe); successful responses feed the clock. `updateHttpClient()`: system CAs only. Tests run on the JVM **and** on the phone (`src/sharedTest`) | `tls/DeviceHttp.kt` |
 
-The `DeviceTrust` facade (S2 §4) grows with each stage: next (stage 6) are `onGatewayDenied`/ping,
-`checkSessionBinding` (whoami) and the RASP checks with the §7.3 policy. Building blocks
+The `DeviceTrust` facade (S2 §4) grows with each stage: next (stage 6) are the RASP checks with
+the §7.3 policy. Building blocks
 are public only behind the `@InternalDeviceTrustApi` opt-in.
 
 **Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix
