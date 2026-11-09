@@ -4,7 +4,7 @@ Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): K
 key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
 `specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
 
-## Status — stages 1–6 of S2 §14
+## Status — stages 1–6 and 7a of S2 §14
 
 | Done | Where |
 |---|---|
@@ -34,13 +34,15 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | RASP (S2 §7): Kotlin checks (`android.system.Os` syscalls) + native `libwolpdt.so` (`devicetrust-native/`, C; only `JNI_OnLoad` exported, `RegisterNatives`, result HMAC-SHA256 under a per-process key); ROOT_SU / DEBUGGER / EMULATOR in both, compared → `HOOK_TAMPER`; Magisk, props, Frida maps/threads/port natively; Xposed, signature, debuggable, software Keystore, settings in Kotlin | `rasp/`, `devicetrust-native/` |
 | Policy S2 §7.3 at runtime: effective build kind (debuggable / pilot `versionCode` / else RELEASE), downgrades ignored in RELEASE, dry run → `dryRun;BLOCK;…` REPORT; runs at init, on foreground + every 5 min, before enroll/renew/recover, `checkIntegrity()` | `rasp/RaspEngine.kt`, `DeviceTrust.kt` |
 | Real RASP pass on the A37: Kotlin = native, HMAC verifies, no false BLOCK | `androidTest/…/RaspDeviceTest.kt` |
+| **7a** native hardening (S2 §7.5): every string literal of `libwolpdt.so` (paths, tokens, properties, check ids, JNI names) lives in `devicetrust-native/strings.txt`, is encrypted at build time (`generateNativeStrings` → `wolpdt_strings.h`) and decrypted onto the stack only while used; `checkNativeStrings` fails the build if any of them is readable in the packaged `.so` | `devicetrust-native/`, `devicetrust/build.gradle.kts` |
+| **7a** native `APK_SIGNATURE`: the installed `base.apk` (found in `/proc/self/maps`, not via PackageManager) → APK Signing Block v3.1 / v3 (by SDK) / v2 → SHA-256 of the signer certificates; dual with the Kotlin (PackageManager) check → a PackageManager hook is `HOOK_TAMPER`. Host tests on APKs signed by `apksigner` (v2, v3, v1-only, v3.1 rotation) + fuzzing; on the A37 native = Kotlin | `devicetrust-native/src/apksig.c`, `devicetrust-native/test/` |
 | `unenroll()` (S2 §6.5a): signed `UNENROLL` queued first (only with a key), intent `UNENROLLING`, everything wiped, `NotEnrolled`; completes in every state (R5) | `cert/CertManager.kt` |
 | Start-up reconciliation S2 §6.6: sticky BLOCK / unenrolling, `pending` switch, `enroll/finish` replay, orphans, `VaultReset`, lifting `UpdateRequired` after an update | `cert/CertManager.kt` |
 | `ensureFresh` (serialised), deadline timer, `RenewWorker` (WorkManager, network, exponential backoff) | `DeviceTrust.kt`, `cert/RenewWorker.kt` |
 | `okHttpClient()`: mTLS + pinning, certificate resolved at handshake time; on `credentialsVersion` change the pool is evicted **and** new connections use a fresh SSLContext (otherwise TLS session resumption keeps the old client identity — Conscrypt cannot invalidate client sessions); R7 built in (denial for a superseded serial → one retry on a fresh connection, HTTP/2-safe); successful responses feed the clock. `updateHttpClient()`: system CAs only. Tests run on the JVM **and** on the phone (`src/sharedTest`) | `tls/DeviceHttp.kt` |
 
 Every `suspend` function of the `DeviceTrust` facade is main-safe (runs on `Dispatchers.IO`).
-Next (stage 7): pilot build, native hardening (string encryption, native `APK_SIGNATURE`), API docs. Building blocks
+Next (stage 7): pilot build, API docs. Building blocks
 are public only behind the `@InternalDeviceTrustApi` opt-in.
 
 **Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix
@@ -69,6 +71,8 @@ Gradle 8.14 needs JDK 17–21 (`JAVA_HOME=/opt/jdk-21.0.2` here; the tools pick 
 ./gradlew :devicetrust:testDebugUnitTest          # JVM tests
 ./gradlew :devicetrust:connectedDebugAndroidTest  # on a device/emulator: real Keystore
 ./gradlew checkForbiddenDependencies              # no Firebase / Play Services (S2 §15 п. 1)
+devicetrust-native/test/run.sh <apk>             # native host tests (ASan/UBSan; needs cc, keytool, apksigner)
+./gradlew :devicetrust:checkNativeStrings         # no plain-text check strings in libwolpdt.so
 tools/bench.sh [-s serial]                        # → bench/<model>.json (Keystore + Vault)
 tools/export-testvectors.sh [-s serial]           # → testvectors/<model>/*.json
 ```

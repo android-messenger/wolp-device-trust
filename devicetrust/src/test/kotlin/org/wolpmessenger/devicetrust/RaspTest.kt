@@ -102,7 +102,7 @@ class RaspTest {
         return body + Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(k, "HmacSHA256")) }.doFinal(body)
     }
 
-    private val cleanNative = "ROOT_SU|C|\nDEBUGGER|C|\nEMULATOR|C|\nROOT_MAGISK|C|\nROOT_PROPS|C|\nHOOK_FRIDA_MAPS|C|\nHOOK_FRIDA_PORT|C|\n"
+    private val cleanNative = "ROOT_SU|C|\nDEBUGGER|C|\nEMULATOR|C|\nAPK_SIGNATURE|C|\nROOT_MAGISK|C|\nROOT_PROPS|C|\nHOOK_FRIDA_MAPS|C|\nHOOK_FRIDA_PORT|C|\n"
     private var nativeOut: () -> NativeResult = { NativeChecks.parse(nativeBytes(cleanNative), key) }
 
     private fun config(policy: RaspPolicy = RaspPolicy.default(), kind: BuildKind = BuildKind.RELEASE, dryRun: Boolean = false) =
@@ -180,11 +180,53 @@ class RaspTest {
     }
 
     @Test
+    fun `APK_SIGNATURE - native reads the APK itself, a PackageManager hook is HOOK_TAMPER`() {
+        // PackageManager (hooked) says the expected signer, the installed file says otherwise
+        nativeOut = { NativeChecks.parse(nativeBytes(cleanNative.replace("APK_SIGNATURE|C|", "APK_SIGNATURE|F|unexpected=" + "cc".repeat(32))), key) }
+        assertEquals(
+            setOf(
+                RaspFinding(RaspCheck.APK_SIGNATURE, BLOCK, "native:unexpected=" + "cc".repeat(32)),
+                RaspFinding(RaspCheck.HOOK_TAMPER, REPORT, "APK_SIGNATURE kotlin=CLEAN native=FOUND"),
+            ),
+            engine().evaluate().findings.toSet(),
+        )
+        // the APK could not be read natively: only the tamper signal, no BLOCK
+        nativeOut = { NativeChecks.parse(nativeBytes(cleanNative.replace("APK_SIGNATURE|C|", "APK_SIGNATURE|D|apk not found")), key) }
+        assertEquals(listOf(RaspFinding(RaspCheck.HOOK_TAMPER, REPORT, "APK_SIGNATURE kotlin=CLEAN native=DENIED")), engine().evaluate().findings)
+        // no signers at all
+        env.signers = emptyList()
+        nativeOut = { NativeChecks.parse(nativeBytes(cleanNative.replace("APK_SIGNATURE|C|", "APK_SIGNATURE|F|no signers")), key) }
+        assertEquals(listOf(RaspFinding(RaspCheck.APK_SIGNATURE, BLOCK, "no signers")), engine().evaluate().findings)
+    }
+
+    @Test
+    fun `APK_SIGNATURE - nothing configured (debuggable app) means no check on either side`() {
+        env.appDebuggable = true
+        val cfg = DeviceTrustConfig(buildKind = BuildKind.DEBUG, raspPolicy = RaspPolicy.default().with(RaspCheck.APP_DEBUGGABLE, IGNORE))
+        nativeOut = { NativeChecks.parse(nativeBytes(cleanNative.replace("APK_SIGNATURE|C|\n", "")), key) }
+        env.signers = listOf("bb".repeat(32))
+        assertEquals(emptyList<RaspFinding>(), engine(cfg).evaluate().findings)
+    }
+
+    @Test
+    fun `expected digests - normalised, passed to native as raw bytes, garbage rejected`() {
+        val digests = KotlinChecks.normalize(listOf("AA:".repeat(31) + "AA", "0f".repeat(32)))
+        assertEquals(setOf("aa".repeat(32), "0f".repeat(32)), digests)
+        var seen = ByteArray(0)
+        NativeChecks(digests) { _, e -> seen = e; null }.scan()
+        assertEquals(64, seen.size)
+        assertEquals(setOf(ByteArray(32) { 0x0f }.toList(), ByteArray(32) { 0xaa.toByte() }.toList()), setOf(seen.copyOfRange(0, 32).toList(), seen.copyOfRange(32, 64).toList()))
+        for (bad in listOf("aa".repeat(31), "zz".repeat(32), "sha256/" + "aa".repeat(32))) {
+            assertTrue(bad, runCatching { KotlinChecks.normalize(listOf(bad)) }.exceptionOrNull() is IllegalArgumentException)
+        }
+    }
+
+    @Test
     fun `JNI integrity - forged HMAC, malformed output, missing library are HOOK_TAMPER`() {
         assertEquals(NativeResult.Tampered("jni hmac"), NativeChecks.parse(nativeBytes(cleanNative, ByteArray(32)), key))
         assertEquals(NativeResult.Tampered("malformed"), NativeChecks.parse(nativeBytes("ROOT_SU|X|\n"), key))
         assertEquals(NativeResult.Tampered("short"), NativeChecks.parse(ByteArray(5), key))
-        val real = NativeChecks { throw UnsatisfiedLinkError("no libwolpdt") }
+        val real = NativeChecks { _, _ -> throw UnsatisfiedLinkError("no libwolpdt") }
         assertEquals(NativeResult.Tampered("native unavailable"), real.scan())
 
         nativeOut = { NativeResult.Tampered("jni hmac") }
@@ -200,7 +242,12 @@ class RaspTest {
         env.level = SecurityLevel.SOFTWARE
         env.buildTags = "test-keys"
         env.status = "TracerPid:\t4242\n"
-        nativeOut = { NativeChecks.parse(nativeBytes(cleanNative.replace("DEBUGGER|C|", "DEBUGGER|F|tracer=4242")), key) }
+        nativeOut = {
+            NativeChecks.parse(
+                nativeBytes(cleanNative.replace("DEBUGGER|C|", "DEBUGGER|F|tracer=4242").replace("APK_SIGNATURE|C|", "APK_SIGNATURE|F|unexpected=" + "bb".repeat(32))),
+                key,
+            )
+        }
         val r = engine().evaluate()
         assertEquals(
             setOf(RaspCheck.DEBUGGER to BLOCK, RaspCheck.HOOK_XPOSED to BLOCK, RaspCheck.APK_SIGNATURE to BLOCK, RaspCheck.APP_DEBUGGABLE to BLOCK,

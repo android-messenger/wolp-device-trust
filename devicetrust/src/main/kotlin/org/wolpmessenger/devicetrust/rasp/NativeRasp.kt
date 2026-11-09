@@ -9,8 +9,9 @@ import javax.crypto.spec.SecretKeySpec
 internal object NativeRasp {
     val loaded: Boolean by lazy { runCatching { System.loadLibrary("wolpdt") }.isSuccess }
 
+    /** [expected]: the expected signing digests, n × 32 raw bytes (empty → no APK_SIGNATURE line). */
     @JvmStatic
-    external fun scan(key: ByteArray): ByteArray?
+    external fun scan(key: ByteArray, expected: ByteArray): ByteArray?
 }
 
 /** Native results, or why they are unusable. */
@@ -25,12 +26,16 @@ internal sealed interface NativeResult {
  * Native side of the checks (S2 §7.5): the result travels through JNI with an HMAC-SHA256 under a
  * per-process session key, so a hook that simply replaces the returned value is detected.
  */
-internal class NativeChecks(private val call: (ByteArray) -> ByteArray? = { NativeRasp.takeIf { it.loaded }?.scan(it) }) {
+internal class NativeChecks(
+    expectedDigests: Set<String> = emptySet(),
+    private val call: (key: ByteArray, expected: ByteArray) -> ByteArray? = { k, e -> NativeRasp.takeIf { it.loaded }?.scan(k, e) },
+) {
     private val key = ByteArray(32).also(SecureRandom()::nextBytes)
+    private val expected: ByteArray = expectedDigests.sorted().fold(ByteArray(0)) { acc, hex -> acc + hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray() }
 
     fun scan(): NativeResult {
         val raw = try {
-            call(key)
+            call(key, expected)
         } catch (e: Throwable) { // UnsatisfiedLinkError and friends
             null
         } ?: return NativeResult.Tampered("native unavailable")

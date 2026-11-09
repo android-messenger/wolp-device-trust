@@ -15,6 +15,7 @@ import org.wolpmessenger.devicetrust.rasp.EffectivePolicy
 import org.wolpmessenger.devicetrust.rasp.KotlinChecks
 import org.wolpmessenger.devicetrust.rasp.NativeChecks
 import org.wolpmessenger.devicetrust.rasp.NativeResult
+import org.wolpmessenger.devicetrust.rasp.ProbeState
 import org.wolpmessenger.devicetrust.rasp.RaspEngine
 
 /**
@@ -26,19 +27,23 @@ import org.wolpmessenger.devicetrust.rasp.RaspEngine
 class RaspDeviceTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private val env = AndroidRaspEnv(context) { null }
-    private val kotlin = KotlinChecks(env, emptySet())
+    /** The test APK's own signer: APK_SIGNATURE runs on both sides and must be clean. */
+    private val digests = env.signingDigests().toSet()
+    private val kotlin = KotlinChecks(env, digests)
 
     @Test
     fun nativeAndKotlinAgreeAndStockPhoneIsClean() {
-        val native = NativeChecks().scan()
+        assertTrue("the test APK has a signer: $digests", digests.isNotEmpty())
+        val native = NativeChecks(digests).scan()
         assertTrue("native library loads and the JNI result verifies: $native", native is NativeResult.Ok)
         native as NativeResult.Ok
         val dual = kotlin.dual()
         println("DT-RASP kotlin=$dual")
         println("DT-RASP native=${native.probes}")
         for ((id, k) in dual) assertEquals("$id: Kotlin and native agree", k.state, native.probes.getValue(id).state)
+        assertEquals(ProbeState.CLEAN, native.probes.getValue(RaspCheck.APK_SIGNATURE).state)
 
-        val report = RaspEngine(kotlin, NativeChecks()::scan, EffectivePolicy(DeviceTrustConfig(buildKind = BuildKind.DEBUG), env.appDebuggable, env.versionCode)).evaluate()
+        val report = RaspEngine(kotlin, NativeChecks(digests)::scan, EffectivePolicy(DeviceTrustConfig(buildKind = BuildKind.DEBUG), env.appDebuggable, env.versionCode)).evaluate()
         println("DT-RASP findings=${report.findings}")
         assertTrue("no tamper: ${report.findings}", report.findings.none { it.id == RaspCheck.HOOK_TAMPER })
         val emulator = Build.HARDWARE in KotlinChecks.EMU_HARDWARE
@@ -47,5 +52,17 @@ class RaspDeviceTest {
         } else {
             assertEquals("stock phone: only the debuggable test APK blocks", setOf(RaspCheck.APP_DEBUGGABLE), report.blocking.map { it.id }.toSet())
         }
+    }
+
+    /** Native reads the installed APK's signing block (not PackageManager) and names the same signer. */
+    @Test
+    fun nativeApkSignatureSeesTheRealSigner() {
+        val wrong = setOf("00".repeat(32))
+        val native = NativeChecks(wrong).scan() as NativeResult.Ok
+        val k = KotlinChecks(env, wrong).dual().getValue(RaspCheck.APK_SIGNATURE)
+        println("DT-RASP apk kotlin=$k native=${native.probes[RaspCheck.APK_SIGNATURE]}")
+        assertEquals(ProbeState.FOUND, k.state)
+        assertEquals(k, native.probes.getValue(RaspCheck.APK_SIGNATURE))
+        assertEquals("unexpected=${digests.single()}", k.detail)
     }
 }
