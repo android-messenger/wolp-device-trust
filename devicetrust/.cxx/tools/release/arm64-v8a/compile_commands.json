@@ -1,0 +1,12 @@
+[
+{
+  "directory": "/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/.cxx/RelWithDebInfo/45206fu2/arm64-v8a",
+  "command": "/home/wolper/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=aarch64-none-linux-android33 --sysroot=/home/wolper/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dwolpdt_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O2 -g -DNDEBUG -fPIC -fvisibility=hidden -Wall -Wextra -Werror -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -o CMakeFiles/wolpdt.dir/src/rasp.c.o -c /home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust-native/src/rasp.c",
+  "file": "/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust-native/src/rasp.c"
+},
+{
+  "directory": "/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/.cxx/RelWithDebInfo/45206fu2/arm64-v8a",
+  "command": "/home/wolper/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=aarch64-none-linux-android33 --sysroot=/home/wolper/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dwolpdt_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O2 -g -DNDEBUG -fPIC -fvisibility=hidden -Wall -Wextra -Werror -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -o CMakeFiles/wolpdt.dir/src/sha256.c.o -c /home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust-native/src/sha256.c",
+  "file": "/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust-native/src/sha256.c"
+}
+]

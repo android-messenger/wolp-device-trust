@@ -11,7 +11,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.wolpmessenger.devicetrust.DeviceTrust
-import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
 import org.wolpmessenger.devicetrust.api.EnrollResult
 
 /**
@@ -40,7 +39,7 @@ class StandEnrollActivity : Activity() {
         say("stand $url, pins ${pins.size}")
 
         try {
-            DeviceTrust.init(this, DeviceTrustConfig(enrollBaseUrl = url, appBaseUrl = url, serverPins = pins, cookieProvider = { cookie }))
+            DeviceTrust.init(this, standConfig(url, url, pins, cookie))
         } catch (e: Exception) {
             result("INIT_FAILED ${e.javaClass.simpleName}: ${e.message}")
             return

@@ -21,6 +21,7 @@ import org.wolpmessenger.devicetrust.api.DeviceSecurityInfo
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
 import org.wolpmessenger.devicetrust.api.EnrollResult
 import org.wolpmessenger.devicetrust.api.PrecheckResult
+import org.wolpmessenger.devicetrust.api.RaspReport
 import org.wolpmessenger.devicetrust.api.TrustEvent
 import org.wolpmessenger.devicetrust.api.TrustState
 import org.wolpmessenger.devicetrust.api.UnenrollResult
@@ -55,6 +56,8 @@ internal class DeviceTrustCore(
     private val gateway: GatewayClient? = null,
     /** Monotonic milliseconds, for the WEBVIEW check rate limit. */
     private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** RASP pass with the policy applied; REPORT findings are queued by it (S2 §7.4). */
+    private val rasp: suspend () -> RaspReport = { RaspReport.CLEAN },
 ) {
     private val checkLock = Mutex()
     private var lastCheckMs: Long? = null
@@ -93,6 +96,21 @@ internal class DeviceTrustCore(
                 publish()
             }
         }
+    }
+
+    /**
+     * RASP pass (S2 §7.2: init, foreground, timer; S1 may call it too). A BLOCK finding runs the
+     * BLOCK reaction (S2 §8) once — a device already blocked is not wiped again on every pass.
+     */
+    suspend fun checkIntegrity(): RaspReport {
+        val r = rasp()
+        if (r.blocking.isNotEmpty() && !certs.isBlocked()) {
+            lock.withLock {
+                certs.raspBlock(r.blocking)
+                publish()
+            }
+        }
+        return r
     }
 
     /** S2 §6.5a: completes locally in every state (R5). */

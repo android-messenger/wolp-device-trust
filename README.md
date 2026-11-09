@@ -4,7 +4,7 @@ Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): K
 key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
 `specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
 
-## Status — stages 1–5 of S2 §14, stage 6 in progress
+## Status — stages 1–6 of S2 §14
 
 | Done | Where |
 |---|---|
@@ -31,13 +31,16 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | `onGatewayDenied(code, source)` (S2 §5.3, R3): `PINNED_CLIENT` acted upon (R7 already applied by the client); `WEBVIEW` only triggers `GET /v1/device/ping` over the pinned channel (≤ 1 per 30 s) and the action follows the ping's code; a failed ping (network, pinning) deletes nothing — tested over real TLS with a fake server whose CA is trusted but whose key is not pinned (S2 §15 п. 7) | `DeviceTrustCore.kt`, `cert/CertManager.kt` |
 | `checkSessionBinding(cookie)` → `GET /v1/device/whoami` (S3 §5.8c): `Match` / `Mismatch` / `NoSession` / `Failed(NO_CREDENTIALS\|NETWORK\|DENIED)` | `DeviceTrustCore.kt`, `api/SessionBinding.kt` |
 | Instrumented: full mTLS handshake (TLS 1.3 and 1.2) with a **Keystore** key through `DeviceHttp` against a client-auth server — fails without `DIGEST_NONE` (verified on the A37) | `androidTest/…/KeystoreMtlsDeviceTest.kt` |
+| RASP (S2 §7): Kotlin checks (`android.system.Os` syscalls) + native `libwolpdt.so` (`devicetrust-native/`, C; only `JNI_OnLoad` exported, `RegisterNatives`, result HMAC-SHA256 under a per-process key); ROOT_SU / DEBUGGER / EMULATOR in both, compared → `HOOK_TAMPER`; Magisk, props, Frida maps/threads/port natively; Xposed, signature, debuggable, software Keystore, settings in Kotlin | `rasp/`, `devicetrust-native/` |
+| Policy S2 §7.3 at runtime: effective build kind (debuggable / pilot `versionCode` / else RELEASE), downgrades ignored in RELEASE, dry run → `dryRun;BLOCK;…` REPORT; runs at init, on foreground + every 5 min, before enroll/renew/recover, `checkIntegrity()` | `rasp/RaspEngine.kt`, `DeviceTrust.kt` |
+| Real RASP pass on the A37: Kotlin = native, HMAC verifies, no false BLOCK | `androidTest/…/RaspDeviceTest.kt` |
 | `unenroll()` (S2 §6.5a): signed `UNENROLL` queued first (only with a key), intent `UNENROLLING`, everything wiped, `NotEnrolled`; completes in every state (R5) | `cert/CertManager.kt` |
 | Start-up reconciliation S2 §6.6: sticky BLOCK / unenrolling, `pending` switch, `enroll/finish` replay, orphans, `VaultReset`, lifting `UpdateRequired` after an update | `cert/CertManager.kt` |
 | `ensureFresh` (serialised), deadline timer, `RenewWorker` (WorkManager, network, exponential backoff) | `DeviceTrust.kt`, `cert/RenewWorker.kt` |
 | `okHttpClient()`: mTLS + pinning, certificate resolved at handshake time; on `credentialsVersion` change the pool is evicted **and** new connections use a fresh SSLContext (otherwise TLS session resumption keeps the old client identity — Conscrypt cannot invalidate client sessions); R7 built in (denial for a superseded serial → one retry on a fresh connection, HTTP/2-safe); successful responses feed the clock. `updateHttpClient()`: system CAs only. Tests run on the JVM **and** on the phone (`src/sharedTest`) | `tls/DeviceHttp.kt` |
 
-The `DeviceTrust` facade (S2 §4) grows with each stage: next (stage 6) are the RASP checks with
-the §7.3 policy. Building blocks
+Every `suspend` function of the `DeviceTrust` facade is main-safe (runs on `Dispatchers.IO`).
+Next (stage 7): pilot build, native hardening (string encryption, native `APK_SIGNATURE`), API docs. Building blocks
 are public only behind the `@InternalDeviceTrustApi` opt-in.
 
 **Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix

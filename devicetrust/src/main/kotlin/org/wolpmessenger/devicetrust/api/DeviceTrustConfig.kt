@@ -45,6 +45,18 @@ public data class DeviceTrustConfig(
     val cookieProvider: () -> String? = { null },
     /** REPORT rate limits (S2 §7.4). */
     val reportRateLimit: ReportLimit = ReportLimit(),
+    /** SHA-256 (hex) of the app signing certificates (`APK_SIGNATURE`, S2 §7.1); required unless the app is debuggable. */
+    val expectedSigningDigests: List<String> = emptyList(),
+    /** Reactions by check id; lowering below the default is ignored in release (S2 §7.3). */
+    val raspPolicy: RaspPolicy = RaspPolicy.default(),
+    /** RASP period while the app is in the foreground (S2 §7.2). */
+    val raspIntervalForeground: Duration = 5.minutes,
+    /** Declared build kind; checked in CI and at runtime (S2 §7.3). */
+    val buildKind: BuildKind = BuildKind.RELEASE,
+    /** The pilot range of `versionCode`: last two digits 90–99 (pilot 10290..10299 → release 10300). */
+    val pilotVersionCode: (Long) -> Boolean = { it % 100 >= 90 },
+    /** Pilot / debug only: every BLOCK becomes a REPORT marked `dryRun` (S2 §7.3); ignored in a release build. */
+    val raspDryRun: Boolean = false,
 ) {
     /** Checks what the network side needs; called by `DeviceTrust.init`. */
     public fun validateForNetwork() {

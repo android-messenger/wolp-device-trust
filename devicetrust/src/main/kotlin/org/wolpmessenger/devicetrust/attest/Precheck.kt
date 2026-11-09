@@ -20,7 +20,7 @@ import java.time.YearMonth
 import java.time.format.DateTimeParseException
 import java.time.temporal.ChronoUnit
 
-/** Source of RASP findings; the real checks arrive in stage 6 (S2 §7). */
+/** Source of RASP findings (S2 §7): `rasp/RaspEngine` in production. */
 @InternalDeviceTrustApi
 public fun interface RaspScanner {
     public suspend fun scan(): RaspReport
@@ -69,7 +69,7 @@ public class Precheck internal constructor(
         if (reasons.isNotEmpty()) return@withLock PrecheckResult.Unsupported(reasons, info)
 
         val reports = raspReport.reports + listOfNotNull(
-            if (!screenLock) RaspFinding(NO_SCREEN_LOCK, RaspReaction.REPORT) else null,
+            if (!screenLock && raspReport.findings.none { it.id == NO_SCREEN_LOCK }) RaspFinding(NO_SCREEN_LOCK, RaspReaction.REPORT) else null,
         )
         PrecheckResult.Supported(info, reports)
     }
