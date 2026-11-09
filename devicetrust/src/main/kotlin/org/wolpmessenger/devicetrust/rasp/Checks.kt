@@ -9,12 +9,13 @@ import org.wolpmessenger.devicetrust.api.RaspCheck
  * reported as HOOK_TAMPER.
  */
 internal class KotlinChecks(private val env: RaspEnv, private val expectedDigests: Set<String>) {
-    /** Checks with a native twin, keyed by id. */
-    fun dual(): Map<String, Probe> = mapOf(
-        RaspCheck.ROOT_SU to su(),
-        RaspCheck.DEBUGGER to tracer(),
-        RaspCheck.EMULATOR to emulator(),
-    )
+    /** Checks with a native twin, keyed by id. APK_SIGNATURE only when digests are configured (native skips it too). */
+    fun dual(): Map<String, Probe> = buildMap {
+        put(RaspCheck.ROOT_SU, su())
+        put(RaspCheck.DEBUGGER, tracer())
+        put(RaspCheck.EMULATOR, emulator())
+        if (expectedDigests.isNotEmpty()) put(RaspCheck.APK_SIGNATURE, apkSignature())
+    }
 
     /** Kotlin-only findings. */
     fun single(): List<RawFinding> = buildList {
@@ -22,7 +23,6 @@ internal class KotlinChecks(private val env: RaspEnv, private val expectedDigest
         env.installedPackages(ROOT_MANAGERS).forEach { add(RawFinding(RaspCheck.ROOT_MANAGER_PKG, it)) }
         if ("test-keys" in env.buildTags) add(RawFinding(RaspCheck.ROOT_PROPS, "Build.TAGS=test-keys"))
         xposed()?.let { add(RawFinding(RaspCheck.HOOK_XPOSED, it)) }
-        apkSignature()?.let { add(RawFinding(RaspCheck.APK_SIGNATURE, it)) }
         if (env.appDebuggable) add(RawFinding(RaspCheck.APP_DEBUGGABLE))
         env.keystoreLevel()?.takeIf { !it.isHardwareConfirmed }?.let { add(RawFinding(RaspCheck.KEYSTORE_SOFTWARE, it.name)) }
         if (env.devOptions()) add(RawFinding(RaspCheck.DEV_OPTIONS))
@@ -66,12 +66,15 @@ internal class KotlinChecks(private val env: RaspEnv, private val expectedDigest
         return env.stackClassNames().firstOrNull { n -> XPOSED_STACK.any { it in n } }
     }
 
-    /** The current signers must all be expected; nothing configured (debuggable app only) → not checked. */
-    private fun apkSignature(): String? {
-        if (expectedDigests.isEmpty()) return null
+    /**
+     * The current signers (PackageManager) must all be expected. The native twin reads the APK
+     * Signing Block of the installed file itself (`apksig.c`) — a PackageManager hook shows up as
+     * HOOK_TAMPER. Same details as native: `no signers`, `unexpected=<hex>`.
+     */
+    private fun apkSignature(): Probe {
         val actual = env.signingDigests()
-        if (actual.isEmpty()) return "no signers"
-        return actual.firstOrNull { it !in expectedDigests }?.let { "unexpected=$it" }
+        if (actual.isEmpty()) return Probe(ProbeState.FOUND, "no signers")
+        return actual.firstOrNull { it !in expectedDigests }?.let { Probe(ProbeState.FOUND, "unexpected=$it") } ?: Probe.CLEAN
     }
 
     internal companion object {
@@ -93,7 +96,13 @@ internal class KotlinChecks(private val env: RaspEnv, private val expectedDigest
         val XPOSED_CLASSES = listOf("de.robv.android.xposed.XposedBridge", "de.robv.android.xposed.XposedHelpers", "org.lsposed.lspd.core.Main")
         val XPOSED_STACK = listOf("de.robv.android.xposed", "org.lsposed", "LSPHooker", "EdHooker")
 
-        /** Normalises configured digests: lowercase hex, no separators. */
-        fun normalize(digests: List<String>): Set<String> = digests.map { it.lowercase().filter { c -> c in '0'..'9' || c in 'a'..'f' } }.toSet()
+        /** Normalises configured digests: lowercase hex, no separators (`AA:BB…` and `aabb…` alike); each must be SHA-256. */
+        fun normalize(digests: List<String>): Set<String> = digests.map { d ->
+            d.lowercase().filter { c -> c in '0'..'9' || c in 'a'..'f' }.also {
+                require(it.length == 64 && d.lowercase().all { c -> c in '0'..'9' || c in 'a'..'f' || c == ':' || c == ' ' }) {
+                    "expectedSigningDigests: '$d' is not a SHA-256 hex digest"
+                }
+            }
+        }.toSet()
     }
 }

@@ -1,0 +1,121 @@
+# Every string literal of libwolpdt.so (S2 §7.5 "зашифрованные строки").
+# The build turns this file into build/generated/wolpdt/wolpdt_strings.h (task
+# :devicetrust:generateNativeStrings): each value is stored XOR-ed with its own keystream and is
+# decrypted onto the stack only while it is used. :devicetrust:checkNativeStrings fails the
+# build if any value of 4+ characters appears in plain text in the packaged .so.
+#
+# Format: NAME value        — one string, used as OBF_NAME
+#         NAME[] value      — next element of the array OBF_NAME (count OBF_NAME_N)
+# The value is the rest of the line after the first run of spaces; C escapes \0 \r \n \t \\ work.
+# Lists shared with Kotlin (SU_PATHS, EMU_PATHS, EMU_HARDWARE…) must stay identical to
+# devicetrust/src/main/kotlin/org/wolpmessenger/devicetrust/rasp/Checks.kt.
+
+# ------------------------------------------------------------------ check ids (S2 §7.1)
+ID_ROOT_SU ROOT_SU
+ID_DEBUGGER DEBUGGER
+ID_EMULATOR EMULATOR
+ID_ROOT_MAGISK ROOT_MAGISK
+ID_ROOT_PROPS ROOT_PROPS
+ID_HOOK_FRIDA_MAPS HOOK_FRIDA_MAPS
+ID_HOOK_FRIDA_PORT HOOK_FRIDA_PORT
+ID_APK_SIGNATURE APK_SIGNATURE
+
+# ------------------------------------------------------------------ ROOT_SU (dual)
+SU_PATHS[] /system/bin/su
+SU_PATHS[] /system/xbin/su
+SU_PATHS[] /sbin/su
+SU_PATHS[] /su/bin/su
+SU_PATHS[] /data/local/su
+SU_PATHS[] /data/local/bin/su
+SU_PATHS[] /data/local/xbin/su
+SU_PATHS[] /system/sd/xbin/su
+SU_PATHS[] /vendor/bin/su
+SU_PATHS[] /product/bin/su
+SU_PATHS[] /odm/bin/su
+SU_PATHS[] /debug_ramdisk/su
+ENV_PATH PATH
+SUFFIX_SU /su
+
+# ------------------------------------------------------------------ DEBUGGER (dual: TracerPid)
+PROC_STATUS /proc/self/status
+TRACER_PID TracerPid:
+STATUS_UNREADABLE status unreadable
+TRACER_EQ tracer=
+
+# ------------------------------------------------------------------ EMULATOR (dual)
+PROP_HARDWARE ro.hardware
+PROP_FINGERPRINT ro.build.fingerprint
+EMU_HARDWARE[] goldfish
+EMU_HARDWARE[] ranchu
+EMU_HARDWARE[] vbox86
+FP_GENERIC generic
+FP_EMULATOR emulator
+FP_SDK_GPHONE sdk_gphone
+HARDWARE_EQ hardware=
+FINGERPRINT_EQ fingerprint=
+EMU_PATHS[] /dev/qemu_pipe
+EMU_PATHS[] /dev/goldfish_pipe
+EMU_PATHS[] /dev/socket/qemud
+EMU_PATHS[] /sys/qemu_trace
+EMU_PATHS[] /system/bin/qemu-props
+EMU_PATHS[] /system/lib/libc_malloc_debug_qemu.so
+
+# ------------------------------------------------------------------ ROOT_MAGISK (native only)
+MAGISK_PATHS[] /sbin/.magisk
+MAGISK_PATHS[] /debug_ramdisk/.magisk
+MAGISK_PATHS[] /data/adb/magisk
+MAGISK_PATHS[] /data/adb/ksu
+MAGISK_PATHS[] /data/adb/ap
+MAGISK_PATHS[] /data/adb/modules
+MAGISK_MOUNT_TOKENS[] magisk
+MAGISK_MOUNT_TOKENS[] /data/adb/modules
+MAGISK_MOUNT_TOKENS[] KSU
+MAGISK_MOUNT_TOKENS[] APatch
+PROC_MOUNTINFO /proc/self/mountinfo
+MOUNTINFO_UNREADABLE mountinfo unreadable
+MOUNTINFO_PREFIX mountinfo:
+
+# ------------------------------------------------------------------ ROOT_PROPS (native part)
+PROP_DEBUGGABLE ro.debuggable
+PROP_SECURE ro.secure
+PROP_BUILD_TAGS ro.build.tags
+TEST_KEYS test-keys
+DETAIL_DEBUGGABLE ro.debuggable=1
+DETAIL_SECURE ro.secure=0
+DETAIL_TEST_KEYS ro.build.tags=test-keys
+
+# ------------------------------------------------------------------ HOOK_FRIDA_MAPS / HOOK_FRIDA_PORT
+PROC_MAPS /proc/self/maps
+FRIDA_MAP_TOKENS[] frida
+FRIDA_MAP_TOKENS[] gum-js
+FRIDA_MAP_TOKENS[] gadget
+FRIDA_THREAD_TOKENS[] gum-js-loop
+FRIDA_THREAD_TOKENS[] pool-frida
+FRIDA_THREAD_TOKENS[] frida
+PROC_TASK /proc/self/task
+PROC_TASK_PREFIX /proc/self/task/
+SUFFIX_COMM /comm
+MAPS_PREFIX maps:
+THREAD_PREFIX thread:
+MAPS_UNREADABLE maps unreadable
+DBUS_AUTH \0AUTH\r\n
+DBUS_REJECTED REJECTED
+PORT_EQ port=
+SOCKET_DENIED socket denied
+
+# ------------------------------------------------------------------ APK_SIGNATURE (dual, stage 7)
+PROC_CMDLINE /proc/self/cmdline
+BASE_APK /base.apk
+PROP_SDK ro.build.version.sdk
+APK_SIG_MAGIC APK Sig Block 42
+APK_NOT_FOUND apk not found
+APK_UNREADABLE apk unreadable
+NO_SIGNING_BLOCK no v2+ signing block
+APK_MALFORMED malformed signing block
+NO_SIGNERS no signers
+UNEXPECTED_EQ unexpected=
+
+# ------------------------------------------------------------------ JNI registration
+JNI_CLASS org/wolpmessenger/devicetrust/rasp/NativeRasp
+JNI_SCAN scan
+JNI_SCAN_SIG ([B[B)[B

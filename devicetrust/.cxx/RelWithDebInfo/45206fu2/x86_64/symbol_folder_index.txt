@@ -1,1 +1,0 @@
-/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/build/intermediates/cxx/RelWithDebInfo/45206fu2/obj/x86_64

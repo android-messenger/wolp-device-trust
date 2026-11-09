@@ -1,3 +1,0 @@
-/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/.cxx/Debug/t73x3x2b/x86_64/CMakeFiles/wolpdt.dir
-/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/.cxx/Debug/t73x3x2b/x86_64/CMakeFiles/edit_cache.dir
-/home/wolper/IdeaProjects/AndroidMessanger/repos/wolp-device-trust/devicetrust/.cxx/Debug/t73x3x2b/x86_64/CMakeFiles/rebuild_cache.dir

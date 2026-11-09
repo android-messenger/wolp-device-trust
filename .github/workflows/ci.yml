@@ -29,6 +29,12 @@ jobs:
       - name: assemble (AAR, sample app, test APKs)
         run: ./gradlew --no-daemon :devicetrust:assembleRelease :devicetrust:assembleDebugAndroidTest :sample:assembleDebug :sample:assembleDebugAndroidTest
 
+      - name: native strings encrypted (S2 §7.5)
+        run: ./gradlew --no-daemon :devicetrust:checkNativeStrings
+
+      - name: native host tests (APK Signing Block reader, string table; ASan/UBSan)
+        run: devicetrust-native/test/run.sh sample/build/outputs/apk/debug/sample-debug.apk
+
       - name: sample APK
         uses: actions/upload-artifact@v4
         with:

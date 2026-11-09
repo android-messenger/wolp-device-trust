@@ -99,9 +99,10 @@ public object DeviceTrust {
         val vault = EnvelopeVault.android(app)
         val versionCodeEarly: Long = app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
         val precheckCache = FilePrecheckCache(File(dir, "precheck.properties"))
+        val digests = KotlinChecks.normalize(config.expectedSigningDigests)
         val engine = RaspEngine(
-            KotlinChecks(AndroidRaspEnv(app) { precheckCache.load()?.level }, KotlinChecks.normalize(config.expectedSigningDigests)),
-            NativeChecks()::scan,
+            KotlinChecks(AndroidRaspEnv(app) { precheckCache.load()?.level }, digests),
+            NativeChecks(digests)::scan,
             EffectivePolicy(config, debuggable, versionCodeEarly),
         )
         lateinit var alertsRef: Alerts
