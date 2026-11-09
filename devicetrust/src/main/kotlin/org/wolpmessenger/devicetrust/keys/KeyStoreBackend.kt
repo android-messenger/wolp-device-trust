@@ -38,7 +38,11 @@ internal class AndroidKeyStoreBackend : KeyStoreBackend {
     override fun generateSigningKey(alias: String, challenge: ByteArray?, strongBox: Boolean) {
         val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
             .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-            .setDigests(KeyProperties.DIGEST_SHA256)
+            // DIGEST_NONE: in TLS client auth Conscrypt signs CertificateVerify over a digest
+            // it computed itself (NONEwithECDSA upcall); without it the client aborts the
+            // handshake (found on the stand, Galaxy A37). SHA256withECDSA stays for CSR,
+            // continuitySig and alerts.
+            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_NONE)
             .setUserAuthenticationRequired(false)
             .setUnlockedDeviceRequired(false)
             .setIsStrongBoxBacked(strongBox)

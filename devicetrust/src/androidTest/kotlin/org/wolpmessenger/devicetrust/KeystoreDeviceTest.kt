@@ -57,6 +57,28 @@ class KeystoreDeviceTest {
         }
     }
 
+    /**
+     * TLS client auth (mTLS to app.<host>): Conscrypt signs CertificateVerify over a digest it
+     * computed itself, through `NONEwithECDSA` on the Keystore key. A key without DIGEST_NONE
+     * makes the client abort the handshake silently (nginx: "peer closed connection in SSL
+     * handshake"), found on the stand with the Galaxy A37.
+     */
+    @Test
+    fun deviceKeySignsPrehashedDigestForTls() {
+        val alias = keys.nextDeviceAlias()
+        val r = keys.generate(alias, challenge, preferStrongBox = false)
+        if (r !is KeyGenResult.Ok) return // software keystore: the device cannot be enrolled anyway
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest("tls 1.3 CertificateVerify".toByteArray())
+        val sig = java.security.Signature.getInstance("NONEwithECDSA").run {
+            initSign(ks.getKey(alias, null) as PrivateKey); update(digest); sign()
+        }
+        val ok = java.security.Signature.getInstance("NONEwithECDSA").run {
+            initVerify(ks.getCertificate(alias).publicKey); update(digest); verify(sig)
+        }
+        assertTrue("NONEwithECDSA signature verifies", ok)
+    }
+
     @Test
     fun strongBoxRequestFallsBackOrSucceeds() {
         val hasStrongBox = context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
