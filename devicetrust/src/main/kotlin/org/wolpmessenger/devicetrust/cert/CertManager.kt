@@ -229,6 +229,22 @@ internal class CertManager(
 
     // ---------------------------------------------------------------- denials on the pinned channel (S2 §5.3)
 
+    /**
+     * A denial S1 received over `okHttpClient()` — or the library's own ping / whoami (S2 §5.3,
+     * PINNED rows). The client already applied R7, so the code refers to the active certificate.
+     */
+    suspend fun onPinnedDenial(code: GatewayCode, reason: String?) {
+        val s = store.load()
+        if (s.phase == Phase.BLOCKED) return
+        when (code) {
+            GatewayCode.CERT_INVALID, GatewayCode.CERT_UNKNOWN, GatewayCode.CERT_EXPIRED -> ensureFresh()
+            GatewayCode.CERT_SUPERSEDED, GatewayCode.UPDATE_REQUIRED, GatewayCode.REATTEST_NOT_ALLOWED,
+            GatewayCode.DEVICE_REVOKED, GatewayCode.DEVICE_REPLACED, GatewayCode.IDENTITY_REVOKED, GatewayCode.DEVICE_POLICY,
+            -> if (s.phase != Phase.NOT_ENROLLED || isDestructive(code)) onDenied(GatewayError(0, code, reason = reason), s)
+            else -> Unit // NO_SESSION, USER_MISMATCH (S1 confirms via whoami), RATE_LIMITED, NONCE_INVALID, UNKNOWN
+        }
+    }
+
     private suspend fun onDenied(err: GatewayError, s: StoredState) {
         when (err.code) {
             GatewayCode.UPDATE_REQUIRED -> {
@@ -252,7 +268,7 @@ internal class CertManager(
         }
     }
 
-    private fun isDestructive(code: GatewayCode) = code == GatewayCode.DEVICE_REVOKED || code == GatewayCode.DEVICE_REPLACED ||
+    fun isDestructive(code: GatewayCode) = code == GatewayCode.DEVICE_REVOKED || code == GatewayCode.DEVICE_REPLACED ||
         code == GatewayCode.IDENTITY_REVOKED || code == GatewayCode.DEVICE_POLICY
 
     /** Device keys gone, Vault kept (the device is not compromised, it was just offline too long). */

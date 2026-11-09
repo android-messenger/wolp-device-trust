@@ -19,6 +19,9 @@ import org.wolpmessenger.devicetrust.alert.AlertSender
 import org.wolpmessenger.devicetrust.alert.AlertWorker
 import org.wolpmessenger.devicetrust.alert.Alerts
 import org.wolpmessenger.devicetrust.api.ClientCredentials
+import org.wolpmessenger.devicetrust.api.DenySource
+import org.wolpmessenger.devicetrust.api.GatewayCode
+import org.wolpmessenger.devicetrust.api.SessionBinding
 import org.wolpmessenger.devicetrust.api.DeviceSecurityInfo
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
 import org.wolpmessenger.devicetrust.api.EnrollResult
@@ -49,9 +52,8 @@ import java.time.Instant
 /**
  * The only entry point for the application (S2 §4). Implemented so far: init (with the S2 §6.6
  * reconciliation), state, credentialsVersion, events, trustNow, precheck, enroll, ensureFresh
- * (renewal / recovery), unenroll, clientCredentials, okHttpClient, updateHttpClient, vault,
- * deviceInfo. Gateway denials from S1 (`onGatewayDenied`), whoami and the RASP checks are next
- * in stage 6.
+ * (renewal / recovery), onGatewayDenied, checkSessionBinding, unenroll, clientCredentials,
+ * okHttpClient, updateHttpClient, vault, deviceInfo. The RASP checks are next in stage 6.
  */
 public object DeviceTrust {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -105,7 +107,7 @@ public object DeviceTrust {
             alerts = alerts,
         )
         val sender = AlertSender(queue, alerts, gateway, config.cookieProvider, clock::now)
-        val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink, sender)
+        val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink, sender, appClient = { http.client }, gateway = gateway)
         vaultImpl = vault
         deviceHttp = http
         core = c
@@ -155,6 +157,21 @@ public object DeviceTrust {
 
     /** Renews when due, recovers when expired (S2 §6.3–6.5); call on start, onResume and on `X-Device-Renew: 1`. */
     public suspend fun ensureFresh(): TrustState = requireCore().ensureFresh()
+
+    /**
+     * A gateway denial S1 saw (S2 §5.3). [source] = `PINNED_CLIENT` (a response to [okHttpClient])
+     * is acted upon; `WEBVIEW` only triggers a pinned `ping` (≤ once per 30 s) whose answer decides
+     * — a code from the WebView alone never deletes keys (R3). [reason] — `UPDATE_REQUIRED` only.
+     */
+    public suspend fun onGatewayDenied(code: GatewayCode, source: DenySource, reason: String? = null): TrustState =
+        requireCore().onGatewayDenied(code, source, reason)
+
+    /**
+     * `GET /v1/device/whoami` over [okHttpClient] with the WebView's Kratos cookie: confirms a
+     * `USER_MISMATCH` (S3 §5.8c). Only with a valid certificate (Active / RenewalDue); otherwise
+     * `Failed(NO_CREDENTIALS)`. S1 never offers unenroll on `NoSession` / `Failed`.
+     */
+    public suspend fun checkSessionBinding(kratosCookie: String): SessionBinding = requireCore().checkSessionBinding(kratosCookie)
 
     /**
      * Unenroll (S2 §6.5a; not offered to users in S1 v1, D15). Always completes locally (R5): with
