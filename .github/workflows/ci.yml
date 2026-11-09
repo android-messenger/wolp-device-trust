@@ -35,6 +35,22 @@ jobs:
       - name: native host tests (APK Signing Block reader, string table; ASan/UBSan)
         run: devicetrust-native/test/run.sh sample/build/outputs/apk/debug/sample-debug.apk
 
+      - name: pilot build (S2 §7.3) with a throwaway release key
+        run: |
+          keytool -genkeypair -keystore "$RUNNER_TEMP/release.p12" -storetype PKCS12 -storepass ci-pass -keypass ci-pass \
+            -alias wolp -keyalg EC -groupname secp256r1 -sigalg SHA256withECDSA -dname "CN=ci" -validity 30
+          SIGN="-Pwolp.signing.storeFile=$RUNNER_TEMP/release.p12 -Pwolp.signing.storePassword=ci-pass -Pwolp.signing.keyAlias=wolp -Pwolp.signing.keyPassword=ci-pass"
+          ./gradlew --no-daemon $SIGN :pilot:assembleProductRelease :pilot:assemblePilotRelease
+          # a product build in the pilot versionCode range must be refused
+          if ./gradlew --no-daemon -q $SIGN -Pwolp.productVersionCode=10295 :pilot:verifyProductReleaseBuildKind; then
+            echo "verifyProductReleaseBuildKind accepted a pilot-range versionCode"; exit 1
+          fi
+          # the app strips libwolpdt.so (ndkVersion set) — no symbols or debug info in the APK
+          for apk in pilot/build/outputs/apk/*/release/*.apk; do
+            unzip -p "$apk" lib/arm64-v8a/libwolpdt.so > "$RUNNER_TEMP/libwolpdt.so"
+            file "$RUNNER_TEMP/libwolpdt.so" | tee /dev/stderr | grep -q ', stripped'
+          done
+
       - name: sample APK
         uses: actions/upload-artifact@v4
         with:

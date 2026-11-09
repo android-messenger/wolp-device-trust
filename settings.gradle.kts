@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "wolp-device-trust"
-include(":devicetrust", ":sample")
+include(":devicetrust", ":sample", ":pilot")

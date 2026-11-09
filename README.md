@@ -4,7 +4,7 @@ Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): K
 key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
 `specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
 
-## Status — stages 1–6 and 7a of S2 §14
+## Status — stages 1–6, 7a, 7b of S2 §14
 
 | Done | Where |
 |---|---|
@@ -42,7 +42,7 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | `okHttpClient()`: mTLS + pinning, certificate resolved at handshake time; on `credentialsVersion` change the pool is evicted **and** new connections use a fresh SSLContext (otherwise TLS session resumption keeps the old client identity — Conscrypt cannot invalidate client sessions); R7 built in (denial for a superseded serial → one retry on a fresh connection, HTTP/2-safe); successful responses feed the clock. `updateHttpClient()`: system CAs only. Tests run on the JVM **and** on the phone (`src/sharedTest`) | `tls/DeviceHttp.kt` |
 
 Every `suspend` function of the `DeviceTrust` facade is main-safe (runs on `Dispatchers.IO`).
-Next (stage 7): pilot build, API docs. Building blocks
+Next (stage 7): API docs. Building blocks
 are public only behind the `@InternalDeviceTrustApi` opt-in.
 
 **Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix
@@ -62,6 +62,24 @@ one JSON with all results plus fresh attestation test vectors, sent via the syst
 adb install -r sample/build/outputs/apk/debug/sample-debug.apk   # or copy the APK to the phone
 ```
 CI also publishes the APK as the `sample-debug-apk` artifact of every run.
+
+## Pilot build reference (`pilot/`, S2 §7.3)
+
+How S1 has to build the app around the library: flavors `product` (`buildKind` RELEASE,
+`versionCode` `MMmmpp` with `pp` 00–89) and `pilot` (PILOT, `pp` 90–99, `raspDryRun`), **one
+applicationId** (pilot users update to the release in place), R8 on, release key for both,
+`ndkVersion` set (the app strips `libwolpdt.so` with its own NDK — without it the `.so` ships with
+symbols). `verify<Variant>BuildKind` runs before every release build and fails on a wrong kind,
+`versionCode` range, dry run in product, debuggable release, missing signing or a signer not in
+`expectedSigningDigests`. The app only shows build facts, the state and `checkIntegrity()` (log tag `DT-PILOT`).
+
+```bash
+SIGN="-Pwolp.signing.storeFile=… -Pwolp.signing.storePassword=… -Pwolp.signing.keyAlias=… -Pwolp.signing.keyPassword=…"
+./gradlew $SIGN :pilot:assembleProductRelease :pilot:assemblePilotRelease   # + -Pwolp.expectedSigningDigests=<hex>
+./gradlew $SIGN -Pwolp.pilot.wrongDigest=true …                            # demo: APK_SIGNATURE BLOCK / dry-run REPORT
+```
+On the A37: product → only REPORT `DEV_OPTIONS`/`ADB_ENABLED`; with a wrong digest pilot → REPORT
+`dryRun;BLOCK;unexpected=…`, product (installed over the pilot) → `Blocked(RASP)`, sticky after restart.
 
 ## Build
 
