@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug only: the devices-stand enrollment screen (wolp-android/p1/stand/devices). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application android:networkSecurityConfig="@xml/network_security_config">
+        <activity
+            android:name=".StandEnrollActivity"
+            android:exported="true"
+            android:label="Stand enroll" />
+    </application>
+</manifest>
