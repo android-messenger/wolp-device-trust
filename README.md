@@ -4,7 +4,7 @@ Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): K
 key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
 `specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
 
-## Status — stages 1–6, 7a, 7b of S2 §14
+## Status — stages 1–7 of S2 §14 (done)
 
 | Done | Where |
 |---|---|
@@ -42,7 +42,7 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | `okHttpClient()`: mTLS + pinning, certificate resolved at handshake time; on `credentialsVersion` change the pool is evicted **and** new connections use a fresh SSLContext (otherwise TLS session resumption keeps the old client identity — Conscrypt cannot invalidate client sessions); R7 built in (denial for a superseded serial → one retry on a fresh connection, HTTP/2-safe); successful responses feed the clock. `updateHttpClient()`: system CAs only. Tests run on the JVM **and** on the phone (`src/sharedTest`) | `tls/DeviceHttp.kt` |
 
 Every `suspend` function of the `DeviceTrust` facade is main-safe (runs on `Dispatchers.IO`).
-Next (stage 7): API docs. Building blocks
+**API guide for the app (S1): [`docs/API.md`](docs/API.md).** `events` is buffered until collected and delivered once (one collector per process). Building blocks
 are public only behind the `@InternalDeviceTrustApi` opt-in.
 
 **Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix

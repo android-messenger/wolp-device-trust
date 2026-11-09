@@ -13,11 +13,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -75,7 +77,13 @@ public object DeviceTrust {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val uninitialized = MutableStateFlow<TrustState>(TrustState.Uninitialized)
     private val zero = MutableStateFlow(0L)
-    private val eventSink = MutableSharedFlow<TrustEvent>(extraBufferCapacity = 16)
+    private val eventSink = MutableSharedFlow<TrustEvent>(extraBufferCapacity = 16) // core-internal
+
+    /**
+     * Events wait here until S1 collects them: init's reconciliation emits `VaultReset` / `Blocked`
+     * asynchronously, typically before anyone subscribed — a SharedFlow would drop them.
+     */
+    private val eventQueue = Channel<TrustEvent>(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     @Volatile
     private var core: DeviceTrustCore? = null
@@ -133,7 +141,7 @@ public object DeviceTrust {
             },
             enroller = enroller,
             versions = { Versions(versionCode, Build.VERSION.SECURITY_PATCH) },
-            emit = { eventSink.tryEmit(it) },
+            emit = { eventQueue.trySend(it) },
             integrity = scanner::scan,
             alerts = alerts,
         )
@@ -202,8 +210,13 @@ public object DeviceTrust {
     /** Grows on every key/certificate change and key deletion; cannot be missed (S1 §4.1). */
     public val credentialsVersion: StateFlow<Long> get() = core?.credentialsVersion ?: zero.asStateFlow()
 
-    /** `Blocked(reason)` (also on every start while blocked) and `VaultReset`. */
-    public val events: SharedFlow<TrustEvent> get() = eventSink.asSharedFlow()
+    /**
+     * `Blocked(reason)` (also on every start while blocked) and `VaultReset`. Buffered until
+     * collected (up to 64, oldest dropped) and delivered **once**: collect it in exactly one
+     * place, for the whole process (S1: `Application.onCreate`, right after `init`). An event
+     * emitted before that collector starts is not lost.
+     */
+    public val events: Flow<TrustEvent> = eventQueue.receiveAsFlow()
 
     /** Server-relative time, or null until the first pinned response in this boot (S2 §5.2). */
     public fun trustNow(): Instant? = core?.trustNow()

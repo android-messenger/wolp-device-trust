@@ -1,6 +1,9 @@
 package org.wolpmessenger.devicetrust.pilot
 
 import android.app.Application
+import android.util.Log
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
 import org.wolpmessenger.devicetrust.DeviceTrust
 import org.wolpmessenger.devicetrust.api.BuildKind
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
@@ -14,6 +17,8 @@ class PilotApp : Application() {
     override fun onCreate() {
         super.onCreate()
         DeviceTrust.init(this, config())
+        // the one collector of the process (events are delivered once, buffered until collected)
+        MainScope().launch { DeviceTrust.events.collect { Log.i("DT-PILOT", "event: $it") } }
     }
 
     companion object {
