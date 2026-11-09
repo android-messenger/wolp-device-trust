@@ -89,6 +89,12 @@ internal class GatewayClient(
         return call(pinned, post(enrollBase, "/v1/device/reattest/finish", body.bytes()), ::issued)
     }
 
+    // --- enroll host, no mTLS (S3 §5.7) ---
+
+    /** `202` → Ok. [cookie] only for unsigned messages (the gateway attributes them to the session). */
+    fun alert(body: ByteArray, cookie: String?): GatewayResult<Unit> =
+        call(pinned, post(enrollBase, "/v1/device/alert", body).apply { cookie?.let { header("Cookie", it) } }) { }
+
     // --- plumbing ---
 
     private fun post(base: HttpUrl, path: String, body: ByteArray) =

@@ -14,11 +14,16 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import org.wolpmessenger.devicetrust.alert.AlertQueue
+import org.wolpmessenger.devicetrust.alert.AlertSender
+import org.wolpmessenger.devicetrust.alert.AlertWorker
+import org.wolpmessenger.devicetrust.alert.Alerts
 import org.wolpmessenger.devicetrust.api.ClientCredentials
 import org.wolpmessenger.devicetrust.api.DeviceSecurityInfo
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
 import org.wolpmessenger.devicetrust.api.EnrollResult
 import org.wolpmessenger.devicetrust.api.PrecheckResult
+import org.wolpmessenger.devicetrust.api.UnenrollResult
 import org.wolpmessenger.devicetrust.api.TrustEvent
 import org.wolpmessenger.devicetrust.api.TrustState
 import org.wolpmessenger.devicetrust.api.Vault
@@ -44,8 +49,9 @@ import java.time.Instant
 /**
  * The only entry point for the application (S2 §4). Implemented so far: init (with the S2 §6.6
  * reconciliation), state, credentialsVersion, events, trustNow, precheck, enroll, ensureFresh
- * (renewal / recovery), clientCredentials, okHttpClient, updateHttpClient, vault, deviceInfo.
- * Gateway denials from S1 (`onGatewayDenied`), whoami, unenroll and RASP arrive in stage 6.
+ * (renewal / recovery), unenroll, clientCredentials, okHttpClient, updateHttpClient, vault,
+ * deviceInfo. Gateway denials from S1 (`onGatewayDenied`), whoami and the RASP checks are next
+ * in stage 6.
  */
 public object DeviceTrust {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -66,7 +72,8 @@ public object DeviceTrust {
         if (core != null) return
         config.validateForNetwork()
         val app = context.applicationContext
-        val store = TrustStore(File(app.noBackupFilesDir, "dt"))
+        val dir = File(app.noBackupFilesDir, "dt")
+        val store = TrustStore(dir)
         val keys = KeystoreKeys.android()
         val clock = TrustClock(AndroidClockSource(app), store.load().clock)
         val vault = EnvelopeVault.android(app)
@@ -76,8 +83,15 @@ public object DeviceTrust {
         val pinned = http.pinned
         val gateway = GatewayClient(pinned, config.enrollBaseUrl.toHttpUrl(), onServerDate, appBase = config.appBaseUrl.toHttpUrl())
         val versionCode = app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
-        val enroller = Enroller(config, precheck::run, keys, gateway, store, { vault.provision() }, { versionCode }, clock::now)
-        val certs = CertManager(
+        val queue = AlertQueue(dir, config.reportRateLimit)
+        val alerts = Alerts(queue, store, keys, clock::now, { versionCode }, { AlertWorker.schedule(app) })
+        lateinit var certs: CertManager
+        // a BLOCK finding in the precheck runs the BLOCK reaction (S2 §6.1 п. 1); enroll already holds the core lock
+        val precheckReacting: suspend () -> PrecheckResult = {
+            precheck.run().also { if (it is PrecheckResult.Compromised) certs.raspBlock(it.report.blocking) }
+        }
+        val enroller = Enroller(config, precheckReacting, keys, gateway, store, { vault.provision() }, { versionCode }, clock::now)
+        certs = CertManager(
             config, store, keys, clock, gateway, pinned,
             mtlsFor = { creds -> HttpClients.mtls(pinned, creds) },
             vault = object : VaultOps {
@@ -88,8 +102,10 @@ public object DeviceTrust {
             enroller = enroller,
             versions = { Versions(versionCode, Build.VERSION.SECURITY_PATCH) },
             emit = { eventSink.tryEmit(it) },
+            alerts = alerts,
         )
-        val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink)
+        val sender = AlertSender(queue, alerts, gateway, config.cookieProvider, clock::now)
+        val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink, sender)
         vaultImpl = vault
         deviceHttp = http
         core = c
@@ -98,6 +114,7 @@ public object DeviceTrust {
         scope.launch {
             c.initialize()
             RenewWorker.schedule(app, config.workInterval)
+            if (!queue.isEmpty()) AlertWorker.schedule(app)
             c.ensureFresh()
             deadlineTimer(c)
         }
@@ -138,6 +155,15 @@ public object DeviceTrust {
 
     /** Renews when due, recovers when expired (S2 §6.3–6.5); call on start, onResume and on `X-Device-Renew: 1`. */
     public suspend fun ensureFresh(): TrustState = requireCore().ensureFresh()
+
+    /**
+     * Unenroll (S2 §6.5a; not offered to users in S1 v1, D15). Always completes locally (R5): with
+     * a device key a signed `UNENROLL` is queued first and delivered in the background.
+     */
+    public suspend fun unenroll(): UnenrollResult = requireCore().unenroll()
+
+    /** One pass of the alert sender (AlertWorker); returns the number of messages still waiting. */
+    internal fun sendAlerts(): Int = core?.sendAlerts() ?: 0
 
     public fun clientCredentials(): ClientCredentials? = core?.clientCredentials()
 

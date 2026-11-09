@@ -4,7 +4,7 @@ Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): K
 key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
 `specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
 
-## Status — stages 1–5 of S2 §14
+## Status — stages 1–5 of S2 §14, stage 6 in progress
 
 | Done | Where |
 |---|---|
@@ -22,17 +22,19 @@ key attestation, mTLS certificates, RASP, Vault. Specification: `android-messeng
 | State store: `state.json` + `certs/<N>.pem`, atomic writes, single-lock read-modify-write | `store/TrustStore.kt` |
 | Gateway client over the pinned OkHttp client (`enroll/start`, `enroll/finish`), clock fed only by successful pinned responses | `net/GatewayClient.kt`, `net/HttpClients.kt` |
 | Enrollment S2 §6.2: precheck → start → key bound to nonce → CSR → persisted intent → finish → Vault → `ENROLLED`; every S3 §5.1–5.2 answer mapped (wrong/burned/expired password, policy vs soft rejection, `NONCE_INVALID` retry once, lost response keeps the intent for replay) | `enroll/Enroller.kt` |
-| `DeviceTrust` facade (stage-3 surface: `init`, `state`, `credentialsVersion`, `trustNow`, `precheck`, `enroll`, `clientCredentials`, `vault`, `deviceInfo`); `TrustState` derived from phase + clock | `DeviceTrust.kt`, `DeviceTrustCore.kt` |
+| `DeviceTrust` facade (`init`, `state`, `credentialsVersion`, `events`, `trustNow`, `precheck`, `enroll`, `ensureFresh`, `unenroll`, `clientCredentials`, `okHttpClient`, `updateHttpClient`, `vault`, `deviceInfo`); `TrustState` derived from phase + clock | `DeviceTrust.kt`, `DeviceTrustCore.kt` |
 | Renewal S2 §6.3 over mTLS with the current key (`renew/challenge` → new key bound to the nonce → `renew` with `continuitySig` → `pending` → switch, `credentialsVersion++`, pool evicted → `confirm` with the new key) | `cert/CertManager.kt`, `tls/FixedKeyManager.kt` |
 | Recovery S2 §6.4 (`reattest/*`): after expiry within grace and after a lost renewal response (`CERT_SUPERSEDED`); `REATTEST_NOT_ALLOWED` → `ReEnrollRequired` with the Vault kept | `cert/CertManager.kt` |
 | `continuitySig` (S3 §5.4) checked against independent vectors shared with the gateway | `cert/ContinuitySig.kt`, `testvectors/continuity/` |
-| Gateway denials on the pinned channel: `UPDATE_REQUIRED`, destructive codes → local BLOCK (intent first, everything wiped, `Blocked` event); signed alert arrives in stage 6 | `cert/CertManager.kt` |
+| Gateway denials on the pinned channel: `UPDATE_REQUIRED`, destructive codes → local BLOCK (intent first, everything wiped, `Blocked` event; no message, S2 §8) | `cert/CertManager.kt` |
+| Alerts (S2 §8, §7.4, S3 §5.7): RASP BLOCK in the strict order (message signed by the current key **before** the wipe → persisted → intent → wipe → event → sender); unsigned before enrollment, sent with the Kratos cookie read at send time; REPORT rate limit per (id, detail) per 24 h, batches of 20, queue of 100; `AlertWorker` (WorkManager, network, backoff, 7-day lifetime; `400` dropped) | `alert/` |
+| `unenroll()` (S2 §6.5a): signed `UNENROLL` queued first (only with a key), intent `UNENROLLING`, everything wiped, `NotEnrolled`; completes in every state (R5) | `cert/CertManager.kt` |
 | Start-up reconciliation S2 §6.6: sticky BLOCK / unenrolling, `pending` switch, `enroll/finish` replay, orphans, `VaultReset`, lifting `UpdateRequired` after an update | `cert/CertManager.kt` |
 | `ensureFresh` (serialised), deadline timer, `RenewWorker` (WorkManager, network, exponential backoff) | `DeviceTrust.kt`, `cert/RenewWorker.kt` |
 | `okHttpClient()`: mTLS + pinning, certificate resolved at handshake time; on `credentialsVersion` change the pool is evicted **and** new connections use a fresh SSLContext (otherwise TLS session resumption keeps the old client identity — Conscrypt cannot invalidate client sessions); R7 built in (denial for a superseded serial → one retry on a fresh connection, HTTP/2-safe); successful responses feed the clock. `updateHttpClient()`: system CAs only. Tests run on the JVM **and** on the phone (`src/sharedTest`) | `tls/DeviceHttp.kt` |
 
-The `DeviceTrust` facade (S2 §4) grows with each stage: next (stage 6) are RASP, the signed
-alert, `onGatewayDenied`/ping, `checkSessionBinding` (whoami) and `unenroll`. Building blocks
+The `DeviceTrust` facade (S2 §4) grows with each stage: next (stage 6) are `onGatewayDenied`/ping,
+`checkSessionBinding` (whoami) and the RASP checks with the §7.3 policy. Building blocks
 are public only behind the `@InternalDeviceTrustApi` opt-in.
 
 **Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix
