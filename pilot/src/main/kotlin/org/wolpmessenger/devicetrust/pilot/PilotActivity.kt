@@ -38,7 +38,6 @@ class PilotActivity : Activity() {
         val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         log("build: kind=${BuildConfig.BUILD_KIND} dryRun=${BuildConfig.RASP_DRY_RUN} versionCode=${info.longVersionCode} debuggable=$debuggable")
         scope.launch { DeviceTrust.state.collect { log("state: $it") } }
-        scope.launch { DeviceTrust.events.collect { log("event: $it") } }
         if (intent.getBooleanExtra("scan", false)) scan()
     }
 
