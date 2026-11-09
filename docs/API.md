@@ -127,7 +127,7 @@ S1 разбирает код через `GatewayCode.parse(header или error)`
 |---|---|
 | `okHttpClient()` | mTLS + закрепление ключей сервера: всё, кроме обновлений. Сертификат выбирается в момент рукопожатия; при смене `credentialsVersion` пул сбрасывается и новые соединения идут с новым `SSLContext` (возобновлённая TLS-сессия иначе несёт старую идентичность). R7 встроен: отказ для вытесненного сертификата повторяется один раз с текущим |
 | `updateHttpClient()` | только системные CA, без mTLS и пинов — **только** подписанный манифест обновлений и APK |
-| `clientCredentials()` | `ClientCredentials(privateKey, chain)` для `WebViewClient.onReceivedClientCertRequest` → `request.proceed(privateKey, chain)`; `null` — нет действующего сертификата (`request.cancel()`). Ключ — дескриптор AndroidKeyStore, байтов ключа нет |
+| `clientCredentials()` | `ClientCredentials(privateKey, chain)` для `WebViewClient.onReceivedClientCertRequest` → `request.proceed(privateKey, chain)`; `null` — нет действующего сертификата: `request.ignore()`, **не** `cancel()` — WebView запоминает решения `proceed`/`cancel` до `clearClientCertPreferences`, а `ignore` нет (S1 §4.1). Ключ — дескриптор AndroidKeyStore, байтов ключа нет |
 
 ## 8. Vault
 
