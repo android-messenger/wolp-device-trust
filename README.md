@@ -1,96 +1,126 @@
 # wolp-device-trust
 
-Android device-trust library for the Wolp messenger app (`org.wolpmessenger`): Keystore keys,
-key attestation, mTLS certificates, RASP, Vault. Specification: `android-messenger/docs` →
-`specs/S2-device-trust-lib.md` (gateway contracts: `specs/S3-gateway.md`).
+Android-библиотека доверия устройства (**S2**) для приложения Wolp Messenger (`org.wolpmessenger`): ключи в Android Keystore, аттестация ключей, клиентские сертификаты для mTLS и их продление, RASP, Vault для ключей E2EE. Спецификация — `android-messenger/docs` → `specs/S2-device-trust-lib.md` (контракты шлюза — `specs/S3-gateway.md`). Концепция безопасности — `docs/security/` (`02-keys-attestation.md`, `05-device-lifecycle.md`, `07-rasp.md`, `08-e2ee-vault-bridge.md`).
 
-## Status — stages 1–7 of S2 §14 (done)
+**Руководство по API для приложения (S1): [`docs/API.md`](docs/API.md).** Публичный API — объект `org.wolpmessenger.devicetrust.DeviceTrust` и пакет `…devicetrust.api`; остальное `internal` или закрыто opt-in `@InternalDeviceTrustApi`. Все `suspend`-функции фасада main-safe (`Dispatchers.IO`). `events` буферизуются до подписки и доставляются один раз (один подписчик на процесс).
 
-| Done | Where |
+```mermaid
+flowchart LR
+  App["Приложение S1<br/>(wolp-android)"] --> DT["DeviceTrust<br/>(фасад)"]
+  DT --> K["keys + attest<br/>Keystore, аттестация"]
+  DT --> E["enroll<br/>регистрация"]
+  DT --> C["cert<br/>продление, восстановление"]
+  DT --> T["tls<br/>mTLS OkHttp, пиннинг"]
+  DT --> R["rasp + native<br/>libwolpdt.so"]
+  DT --> A["alert<br/>BLOCK / REPORT / UNENROLL"]
+  DT --> V["vault<br/>ключи E2EE"]
+  E & C & A --> T
+  T --> GW["шлюз S3<br/>enroll / renew / ping / alert"]
+```
+
+## Модули
+
+| Модуль | Что |
 |---|---|
-| Keystore keys: EC P-256 signing key with attestation challenge, StrongBox → TEE fallback (S2 §3), hardware-level check (`SOFTWARE`/`UNKNOWN*` rejected and deleted), alias numbering, orphan cleanup | `devicetrust/…/keys/` |
-| Attestation chain wrapper (DER for `enroll/finish`, RKP/factory label) | `devicetrust/…/attest/AttestationChain.kt` |
-| Precheck (S2 §6.1): RASP hook → Keystore level (cached per boot + app version) → patch age → screen lock as REPORT | `devicetrust/…/attest/Precheck.kt` |
-| Test-vector export for S3 | `sample/…/TestVectorExporter.kt`, `tools/export-testvectors.sh`, `testvectors/` |
-| TEE vs StrongBox measurements (keygen, signature latency, concurrent signing) | `sample/…/Diagnostics.kt`, `tools/bench.sh` |
-| Vault (S2 §9): KEK `dt.vault` in Keystore wraps only the DEK (`dt/dek.bin`, one Keystore call per process); `wrap`/`unwrap` = software AES-256-GCM with authenticated header and purpose; `KeyGone` / `Locked` / `Corrupt`; `provision`, `wipe`, partial-state detection for §6.6 | `devicetrust/…/vault/`, `api/Vault.kt` |
-| Vault measurements (DEK unwrap, wrap/unwrap 4 KiB) | `sample/…/Diagnostics.kt`, `tools/bench.sh` |
-| DER encoder + PKCS#10 CSR (empty subject, SPKI, `ecdsa-with-SHA256`), verified by OpenSSL in JVM tests and on-device with a Keystore key; CSR in every test vector | `devicetrust/…/asn1/` |
-| `TrustClock` (S2 §5.2): server `Date` from the pinned channel + `elapsedRealtime`, per-boot anchor, `trustNow()` null until known | `devicetrust/…/clock/` |
-| Gateway errors: `GatewayCode` (S3 §5.9), body `{"error",…}` with `X-Device-Deny` fallback, `Retry-After` | `api/GatewayCode.kt`, `net/GatewayError.kt` |
-| `enroll/start` body encoded straight to bytes — the password never becomes a `String` (S2 §6.2 п. 2) | `enroll/EnrollStartBody.kt` |
-| State store: `state.json` + `certs/<N>.pem`, atomic writes, single-lock read-modify-write | `store/TrustStore.kt` |
-| Gateway client over the pinned OkHttp client (`enroll/start`, `enroll/finish`), clock fed only by successful pinned responses | `net/GatewayClient.kt`, `net/HttpClients.kt` |
-| Enrollment S2 §6.2: precheck → start → key bound to nonce → CSR → persisted intent → finish → Vault → `ENROLLED`; every S3 §5.1–5.2 answer mapped (wrong/burned/expired password, policy vs soft rejection, `NONCE_INVALID` retry once, lost response keeps the intent for replay) | `enroll/Enroller.kt` |
-| `DeviceTrust` facade (`init`, `state`, `credentialsVersion`, `events`, `trustNow`, `precheck`, `enroll`, `ensureFresh`, `unenroll`, `clientCredentials`, `okHttpClient`, `updateHttpClient`, `vault`, `deviceInfo`); `TrustState` derived from phase + clock | `DeviceTrust.kt`, `DeviceTrustCore.kt` |
-| Renewal S2 §6.3 over mTLS with the current key (`renew/challenge` → new key bound to the nonce → `renew` with `continuitySig` → `pending` → switch, `credentialsVersion++`, pool evicted → `confirm` with the new key) | `cert/CertManager.kt`, `tls/FixedKeyManager.kt` |
-| Recovery S2 §6.4 (`reattest/*`): after expiry within grace and after a lost renewal response (`CERT_SUPERSEDED`); `REATTEST_NOT_ALLOWED` → `ReEnrollRequired` with the Vault kept | `cert/CertManager.kt` |
-| `continuitySig` (S3 §5.4) checked against independent vectors shared with the gateway | `cert/ContinuitySig.kt`, `testvectors/continuity/` |
-| Gateway denials on the pinned channel: `UPDATE_REQUIRED`, destructive codes → local BLOCK (intent first, everything wiped, `Blocked` event; no message, S2 §8) | `cert/CertManager.kt` |
-| Alerts (S2 §8, §7.4, S3 §5.7): RASP BLOCK in the strict order (message signed by the current key **before** the wipe → persisted → intent → wipe → event → sender); unsigned before enrollment, sent with the Kratos cookie read at send time; REPORT rate limit per (id, detail) per 24 h, batches of 20, queue of 100; `AlertWorker` (WorkManager, network, backoff, 7-day lifetime; `400` dropped) | `alert/` |
-| `onGatewayDenied(code, source)` (S2 §5.3, R3): `PINNED_CLIENT` acted upon (R7 already applied by the client); `WEBVIEW` only triggers `GET /v1/device/ping` over the pinned channel (≤ 1 per 30 s) and the action follows the ping's code; a failed ping (network, pinning) deletes nothing — tested over real TLS with a fake server whose CA is trusted but whose key is not pinned (S2 §15 п. 7) | `DeviceTrustCore.kt`, `cert/CertManager.kt` |
-| `checkSessionBinding(cookie)` → `GET /v1/device/whoami` (S3 §5.8c): `Match` / `Mismatch` / `NoSession` / `Failed(NO_CREDENTIALS\|NETWORK\|DENIED)` | `DeviceTrustCore.kt`, `api/SessionBinding.kt` |
-| Instrumented: full mTLS handshake (TLS 1.3 and 1.2) with a **Keystore** key through `DeviceHttp` against a client-auth server — fails without `DIGEST_NONE` (verified on the A37) | `androidTest/…/KeystoreMtlsDeviceTest.kt` |
-| RASP (S2 §7): Kotlin checks (`android.system.Os` syscalls) + native `libwolpdt.so` (`devicetrust-native/`, C; only `JNI_OnLoad` exported, `RegisterNatives`, result HMAC-SHA256 under a per-process key); ROOT_SU / DEBUGGER / EMULATOR in both, compared → `HOOK_TAMPER`; Magisk, props, Frida maps/threads/port natively; Xposed, signature, debuggable, software Keystore, settings in Kotlin | `rasp/`, `devicetrust-native/` |
-| Policy S2 §7.3 at runtime: effective build kind (debuggable / pilot `versionCode` / else RELEASE), downgrades ignored in RELEASE, dry run → `dryRun;BLOCK;…` REPORT; runs at init, on foreground + every 5 min, before enroll/renew/recover, `checkIntegrity()` | `rasp/RaspEngine.kt`, `DeviceTrust.kt` |
-| Real RASP pass on the A37: Kotlin = native, HMAC verifies, no false BLOCK | `androidTest/…/RaspDeviceTest.kt` |
-| **7a** native hardening (S2 §7.5): every string literal of `libwolpdt.so` (paths, tokens, properties, check ids, JNI names) lives in `devicetrust-native/strings.txt`, is encrypted at build time (`generateNativeStrings` → `wolpdt_strings.h`) and decrypted onto the stack only while used; `checkNativeStrings` fails the build if any of them is readable in the packaged `.so` | `devicetrust-native/`, `devicetrust/build.gradle.kts` |
-| **7a** native `APK_SIGNATURE`: the installed `base.apk` (found in `/proc/self/maps`, not via PackageManager) → APK Signing Block v3.1 / v3 (by SDK) / v2 → SHA-256 of the signer certificates; dual with the Kotlin (PackageManager) check → a PackageManager hook is `HOOK_TAMPER`. Host tests on APKs signed by `apksigner` (v2, v3, v1-only, v3.1 rotation) + fuzzing; on the A37 native = Kotlin | `devicetrust-native/src/apksig.c`, `devicetrust-native/test/` |
-| `unenroll()` (S2 §6.5a): signed `UNENROLL` queued first (only with a key), intent `UNENROLLING`, everything wiped, `NotEnrolled`; completes in every state (R5) | `cert/CertManager.kt` |
-| Start-up reconciliation S2 §6.6: sticky BLOCK / unenrolling, `pending` switch, `enroll/finish` replay, orphans, `VaultReset`, lifting `UpdateRequired` after an update | `cert/CertManager.kt` |
-| `ensureFresh` (serialised), deadline timer, `RenewWorker` (WorkManager, network, exponential backoff) | `DeviceTrust.kt`, `cert/RenewWorker.kt` |
-| `okHttpClient()`: mTLS + pinning, certificate resolved at handshake time; on `credentialsVersion` change the pool is evicted **and** new connections use a fresh SSLContext (otherwise TLS session resumption keeps the old client identity — Conscrypt cannot invalidate client sessions); R7 built in (denial for a superseded serial → one retry on a fresh connection, HTTP/2-safe); successful responses feed the clock. `updateHttpClient()`: system CAs only. Tests run on the JVM **and** on the phone (`src/sharedTest`) | `tls/DeviceHttp.kt` |
+| `devicetrust/` | библиотека (AAR), `minSdk` 33; пакеты ниже |
+| `devicetrust-native/` | `libwolpdt.so` (C): native-проверки RASP, `APK_SIGNATURE`, зашифрованные строки (`strings.txt`), host-тесты (`test/`) |
+| `sample/` | демо-приложение: факты устройства, предпроверка, аттестация, замеры, отчёт; активности стенда `StandEnrollActivity`, `StandRenewActivity` |
+| `pilot/` | **эталон сборки** приложения: flavors product/pilot, R8, release-подпись, `verify<Variant>BuildKind` |
+| `docs/API.md` | руководство по интеграции |
+| `bench/`, `testvectors/`, `testvectors-export/`, `tools/` | замеры на устройствах, тестовые векторы для S3, скрипты `bench.sh`, `export-testvectors.sh` |
 
-Every `suspend` function of the `DeviceTrust` facade is main-safe (runs on `Dispatchers.IO`).
-**API guide for the app (S1): [`docs/API.md`](docs/API.md).** `events` is buffered until collected and delivered once (one collector per process). Building blocks
-are public only behind the `@InternalDeviceTrustApi` opt-in.
+Пакеты `devicetrust/src/main/kotlin/org/wolpmessenger/devicetrust/`:
 
-**Open in stages 1–2:** measurements and hardware test vectors need the S2 §13 device matrix
-(Pixel 8+, Samsung with Knox Vault, Samsung A, a factory-chain device). On the emulator the
-Keystore is software: precheck → `Unsupported(SOFTWARE_KEYSTORE)` (S2 §15 п. 2, verified).
-Emulator Vault numbers (software KEK, not representative): wrap/unwrap 4 KiB p95 0.22 ms, DEK unwrap p95 1.8 ms
-(targets: 1 ms / 50 ms on the matrix).
+| Пакет | Что |
+|---|---|
+| `keys/`, `attest/` | ключи EC P-256 с challenge аттестации, StrongBox → TEE, отказ `SOFTWARE`; цепочка аттестации; предпроверка (S2 §6.1) |
+| `asn1/` | DER-кодировщик и PKCS#10 CSR |
+| `clock/` | `TrustClock`: время сервера из закреплённого канала + `elapsedRealtime` |
+| `net/`, `api/` | клиент шлюза, `GatewayCode` (S3 §5.9), публичные типы |
+| `enroll/` | регистрация (S2 §6.2); пароль онбординга не становится `String` |
+| `cert/` | продление (§6.3), восстановление `reattest` (§6.4), сверка при старте (§6.6), `unenroll`, `RenewWorker` |
+| `tls/` | `okHttpClient()` с mTLS и пиннингом, сброс пула и SSLContext при смене `credentialsVersion`, R7; `updateHttpClient()` — только системные CA |
+| `rasp/` | проверки Kotlin, политика §7.3 по типу сборки, dry run |
+| `alert/` | подписанные BLOCK / REPORT / UNENROLL, очередь, `AlertWorker` |
+| `vault/` | KEK `dt.vault` в Keystore оборачивает DEK; `wrap`/`unwrap` — AES-256-GCM с назначением |
+| `store/` | `state.json` + `certs/<N>.pem`, атомарная запись |
 
-## Sample app (try it on a phone)
+## Сделано — этапы 1–7 (S2 §14, PR #1–#17 слиты)
 
-`sample/` — Compose app, no gateway needed: device facts, precheck, key attestation (TEE and
-StrongBox, chain shown), Keystore/Vault measurements against the S2 targets, and **Share report** —
-one JSON with all results plus fresh attestation test vectors, sent via the system share sheet.
+| Этап | Что |
+|---|---|
+| 1 | ключи Keystore, аттестация, предпроверка, экспорт тестовых векторов, замеры TEE/StrongBox |
+| 2 | Vault (конвертная схема) и замеры |
+| 3 | DER/CSR, клиент шлюза, регистрация, хранилище, `TrustClock` |
+| 4 | продление, восстановление, сверка §6.6, `RenewWorker` |
+| 5 | mTLS-клиент: `credentialsVersion`, сброс пула и TLS-сессий, R7 |
+| 6 | RASP Kotlin + native, политика §7.3, alerts (BLOCK/REPORT), `onGatewayDenied` (§5.3), `unenroll`, `checkSessionBinding`, инструментальный тест mTLS ключом Keystore |
+| 7 | шифрование строк `libwolpdt.so`, native `APK_SIGNATURE` (APK Signing Block v2/v3/v3.1), `pilot/` — эталон сборки, `docs/API.md` |
+
+Ключевые свойства:
+- BLOCK при RASP — строго: сообщение, подписанное текущим ключом, **до** стирания → намерение → стирание → событие; сбой между шагами доводится при следующем старте.
+- Отказ шлюза, пришедший из WebView, сам ничего не стирает: только `GET /v1/device/ping` по закреплённому каналу (не чаще раза в 30 с), действие — по его коду. Неудачный ping ничего не удаляет.
+- Native-проверки сравниваются с Kotlin-проверками; расхождение → `HOOK_TAMPER`. Результат native подписан HMAC-SHA256 ключом процесса.
+- `checkNativeStrings` валит сборку, если строка проверки читается в упакованной `.so`.
+
+На **Galaxy A37** (SM-A376B, Android 16, TEE, без StrongBox): регистрация и продление против стенда, mTLS ключом Keystore (TLS 1.3 и 1.2), RASP Kotlin = native без ложных BLOCK, native `APK_SIGNATURE` = Kotlin; замеры Vault в целях S2 — [`bench/README.md`](bench/README.md). На эмуляторе Keystore программный → `Unsupported(SOFTWARE_KEYSTORE)` (S2 §15 п. 2).
+
+## Остаток
+
+| Что | Почему не сделано |
+|---|---|
+| матрица устройств S2 §13: Pixel 8+ (StrongBox, RKP), Samsung с Knox Vault, устройство с заводской цепочкой | нужны устройства; замеры StrongBox нужны для решения `deviceKeyStrongBox` (R4) |
+| RASP на root-устройстве: Magisk, `frida-server` | нужно устройство с root |
+
+## Подключение
+
+Как в [`wolp-android`](https://github.com/android-messenger/wolp-android): git-подмодуль `app/android/third_party/wolp-device-trust` (закреплённый коммит `main`) и `includeBuild` с подстановкой модуля:
+
+```kotlin
+// settings.gradle.kts приложения
+includeBuild("third_party/wolp-device-trust") {
+    dependencySubstitution {
+        substitute(module("org.wolpmessenger:devicetrust")).using(project(":devicetrust"))
+    }
+}
+```
+
+Обязательно: `ndkVersion` в модуле приложения (иначе `libwolpdt.so` попадёт в APK с символами), R8, одна release-подпись для product и pilot. Полный список — [`docs/API.md` §1](docs/API.md#1-подключение), образец сборки — [`pilot/build.gradle.kts`](pilot/build.gradle.kts). Репозиторий приватный: CI `wolp-android` забирает его deploy-ключом только на чтение.
+
+## Sample app
+
+`sample/` — приложение на Compose, шлюз не нужен: факты устройства, предпроверка, аттестация ключа (TEE и StrongBox, цепочка), замеры Keystore/Vault против целей S2 и **Share report** — один JSON со всеми результатами и свежими тестовыми векторами через системное меню «Поделиться».
 
 ```bash
 ./gradlew :sample:assembleDebug
-adb install -r sample/build/outputs/apk/debug/sample-debug.apk   # or copy the APK to the phone
+adb install -r sample/build/outputs/apk/debug/sample-debug.apk
 ```
-CI also publishes the APK as the `sample-debug-apk` artifact of every run.
 
-## Pilot build reference (`pilot/`, S2 §7.3)
+CI публикует APK артефактом `sample-debug-apk` каждого запуска. Стенд регистрации (`wolp-android/p1/stand/devices`, `enroll.sh`, `renew.sh`) запускает `StandEnrollActivity` / `StandRenewActivity` из debug-сборки `sample`.
 
-How S1 has to build the app around the library: flavors `product` (`buildKind` RELEASE,
-`versionCode` `MMmmpp` with `pp` 00–89) and `pilot` (PILOT, `pp` 90–99, `raspDryRun`), **one
-applicationId** (pilot users update to the release in place), R8 on, release key for both,
-`ndkVersion` set (the app strips `libwolpdt.so` with its own NDK — without it the `.so` ships with
-symbols). `verify<Variant>BuildKind` runs before every release build and fails on a wrong kind,
-`versionCode` range, dry run in product, debuggable release, missing signing or a signer not in
-`expectedSigningDigests`. The app only shows build facts, the state and `checkIntegrity()` (log tag `DT-PILOT`).
+## Эталон сборки (`pilot/`, S2 §7.3)
+
+Flavors `product` (`buildKind` RELEASE, `versionCode` `MMmmpp`, `pp` 00–89) и `pilot` (PILOT, `pp` 90–99, `raspDryRun`), **один applicationId** (пилот обновляется до релиза на месте), R8, одна release-подпись, `ndkVersion`. `verify<Variant>BuildKind` перед каждой release-сборкой отказывает при неверном типе, диапазоне `versionCode`, dry run в product, debuggable release, отсутствии подписи или подписи не из `expectedSigningDigests`. Приложение показывает факты сборки, состояние и `checkIntegrity()` (тег `DT-PILOT`).
 
 ```bash
-SIGN="-Pwolp.signing.storeFile=… -Pwolp.signing.storePassword=… -Pwolp.signing.keyAlias=… -Pwolp.signing.keyPassword=…"
-./gradlew $SIGN :pilot:assembleProductRelease :pilot:assemblePilotRelease   # + -Pwolp.expectedSigningDigests=<hex>
-./gradlew $SIGN -Pwolp.pilot.wrongDigest=true …                            # demo: APK_SIGNATURE BLOCK / dry-run REPORT
+./gradlew $SIGN -Pwolp.expectedSigningDigests=<hex> :pilot:assembleProductRelease :pilot:assemblePilotRelease
+./gradlew $SIGN -Pwolp.pilot.wrongDigest=true …   # демонстрация: APK_SIGNATURE BLOCK / dry-run REPORT
 ```
-On the A37: product → only REPORT `DEV_OPTIONS`/`ADB_ENABLED`; with a wrong digest pilot → REPORT
-`dryRun;BLOCK;unexpected=…`, product (installed over the pilot) → `Blocked(RASP)`, sticky after restart.
 
-## Build
+`$SIGN` — свойства `wolp.signing.storeFile`, `storePassword`, `keyAlias`, `keyPassword`.
 
-Gradle 8.14 needs JDK 17–21 (`JAVA_HOME=/opt/jdk-21.0.2` here; the tools pick one automatically).
+## Сборка и проверки
+
+Gradle 8.14 требует JDK 17–21.
 
 ```bash
-./gradlew :devicetrust:testDebugUnitTest          # JVM tests
-./gradlew :devicetrust:connectedDebugAndroidTest  # on a device/emulator: real Keystore
-./gradlew checkForbiddenDependencies              # no Firebase / Play Services (S2 §15 п. 1)
-devicetrust-native/test/run.sh <apk>             # native host tests (ASan/UBSan; needs cc, keytool, apksigner)
-./gradlew :devicetrust:checkNativeStrings         # no plain-text check strings in libwolpdt.so
+./gradlew :devicetrust:testDebugUnitTest          # JVM-тесты
+./gradlew :devicetrust:connectedDebugAndroidTest  # на устройстве: настоящий Keystore
+./gradlew checkForbiddenDependencies              # нет Firebase / Play Services (S2 §15 п. 1)
+./gradlew :devicetrust:checkNativeStrings         # нет открытых строк проверок в libwolpdt.so
+devicetrust-native/test/run.sh <apk>              # host-тесты native (ASan/UBSan; нужны cc, keytool, apksigner)
 tools/bench.sh [-s serial]                        # → bench/<model>.json (Keystore + Vault)
 tools/export-testvectors.sh [-s serial]           # → testvectors/<model>/*.json
 ```
+
+CI (`.github/workflows/ci.yml`): JVM-тесты, `checkForbiddenDependencies`, сборка AAR/sample/тестовых APK, `checkNativeStrings`, host-тесты native, pilot-сборки одноразовым ключом, APK `sample` артефактом.
