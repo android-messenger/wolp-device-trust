@@ -83,6 +83,9 @@ internal class DeviceTrustCore(
     }
 
     suspend fun enroll(cookie: String, password: CharArray): EnrollResult = lock.withLock {
+        // `ReEnrollRequired` computed from the clock alone: let the gateway confirm it first
+        // (CertManager.ensureFresh) — until it does, the stored phase does not admit an enrollment
+        if (certs.state() is TrustState.ReEnrollRequired) certs.ensureFresh()
         enroller.enroll(cookie, password).also { publish() }
     }
 

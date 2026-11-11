@@ -257,6 +257,45 @@ class CertManagerTest {
     }
 
     @Test
+    fun `past the grace period the gateway decides - REATTEST_NOT_ALLOWED opens re-enrollment, the Vault is kept`() = runTest {
+        enrolledWithK1()
+        clock.set(k1.notAfter.plusSeconds(8 * 24 * 3600L)) // grace is 7 days
+        assertEquals(TrustState.ReEnrollRequired, manager().state())
+        assertEquals("only computed so far", Phase.ENROLLED, store.load().phase)
+
+        server.enqueue(refused(403, """{"error":"REATTEST_NOT_ALLOWED"}"""))
+        assertEquals(TrustState.ReEnrollRequired, manager().ensureFresh())
+        assertEquals("/v1/device/reattest/challenge", take().path)
+        assertEquals("the phase Enroller accepts", Phase.RE_ENROLL_REQUIRED, store.load().phase)
+        assertTrue(backend.deviceAliases().isEmpty())
+        assertTrue("Vault survives", vault.present)
+        assertEquals(0, vault.wipes)
+
+        manager().ensureFresh() // settled: the gateway is not asked again
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `past the grace period by a wrong phone clock - the gateway still recovers the certificate`() = runTest {
+        enrolledWithK1()
+        clock.set(k1.notAfter.plusSeconds(30 * 24 * 3600L))
+        server.enqueue(challenge())
+        server.enqueue(issued(Instant.ofEpochMilli(clock.nowMs)))
+        assertTrue(manager().ensureFresh() is TrustState.Active)
+        assertEquals(listOf("dt.device.k2"), backend.aliases())
+    }
+
+    @Test
+    fun `past the grace period without network nothing is deleted`() = runTest {
+        enrolledWithK1()
+        clock.set(k1.notAfter.plusSeconds(8 * 24 * 3600L))
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+        assertEquals(TrustState.ReEnrollRequired, manager().ensureFresh())
+        assertEquals(Phase.ENROLLED, store.load().phase)
+        assertEquals(listOf(k1.alias), backend.aliases())
+    }
+
+    @Test
     fun `reconcile switches to a recorded pending certificate and confirms it`() = runTest {
         enrolledWithK1()
         backend.generateSigningKey("dt.device.k2", null, false)

@@ -104,13 +104,22 @@ internal class CertManager(
 
     fun state(): TrustState = deriveState(store.load(), clock.now(), config.reattestGrace)
 
-    /** Brings the certificate up to date: renew when due, recover when expired (S2 §6.5). */
+    /**
+     * Brings the certificate up to date: renew when due, recover when expired (S2 §6.5).
+     *
+     * Past the grace period the device still asks the gateway once more instead of deciding by
+     * its own clock: only the gateway's `REATTEST_NOT_ALLOWED` deletes the device keys and
+     * records `RE_ENROLL_REQUIRED` — the phase in which [Enroller] accepts a new enrollment.
+     * A wrong phone clock therefore cannot cost the device its keys, and a device that really
+     * was away too long can enroll again (it could not: the phase stayed `ENROLLED`).
+     */
     suspend fun ensureFresh(): TrustState {
         clearUpdateRequiredIfUpdated()
         val s = store.load()
         when (deriveState(s, clock.now(), config.reattestGrace)) {
             is TrustState.RenewalDue -> renew(s, nonceRetryLeft = true)
             is TrustState.ExpiredGrace -> recover(s)
+            is TrustState.ReEnrollRequired -> if (s.phase == Phase.ENROLLED) recover(s)
             else -> Unit
         }
         return state()
