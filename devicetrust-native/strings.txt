@@ -16,6 +16,7 @@ ID_DEBUGGER DEBUGGER
 ID_EMULATOR EMULATOR
 ID_ROOT_MAGISK ROOT_MAGISK
 ID_ROOT_PROPS ROOT_PROPS
+ID_ROOT_TEST_KEYS ROOT_TEST_KEYS
 ID_HOOK_FRIDA_MAPS HOOK_FRIDA_MAPS
 ID_HOOK_FRIDA_PORT HOOK_FRIDA_PORT
 ID_APK_SIGNATURE APK_SIGNATURE
@@ -63,14 +64,13 @@ EMU_PATHS[] /system/lib/libc_malloc_debug_qemu.so
 # ------------------------------------------------------------------ ROOT_MAGISK (native only)
 MAGISK_PATHS[] /sbin/.magisk
 MAGISK_PATHS[] /debug_ramdisk/.magisk
-MAGISK_PATHS[] /data/adb/magisk
-MAGISK_PATHS[] /data/adb/ksu
-MAGISK_PATHS[] /data/adb/ap
-MAGISK_PATHS[] /data/adb/modules
+# no /data/adb/* here: the directory is root-only, so stat answers EACCES for every app on every
+# device, rooted or not (measured on a stock Galaxy A37, specs/001-rasp-hardening/device-matrix.md)
 MAGISK_MOUNT_TOKENS[] magisk
 MAGISK_MOUNT_TOKENS[] /data/adb/modules
-MAGISK_MOUNT_TOKENS[] KSU
-MAGISK_MOUNT_TOKENS[] APatch
+# whole space-delimited fields only (the mount source of KernelSU / APatch overlays), not substrings
+MAGISK_MOUNT_FIELDS[] KSU
+MAGISK_MOUNT_FIELDS[] APatch
 PROC_MOUNTINFO /proc/self/mountinfo
 MOUNTINFO_UNREADABLE mountinfo unreadable
 MOUNTINFO_PREFIX mountinfo:
@@ -88,7 +88,8 @@ DETAIL_TEST_KEYS ro.build.tags=test-keys
 PROC_MAPS /proc/self/maps
 FRIDA_MAP_TOKENS[] frida
 FRIDA_MAP_TOKENS[] gum-js
-FRIDA_MAP_TOKENS[] gadget
+# not the bare word "gadget": any mapped file may contain it, and this check wipes the device
+FRIDA_MAP_TOKENS[] libgadget.so
 FRIDA_THREAD_TOKENS[] gum-js-loop
 FRIDA_THREAD_TOKENS[] pool-frida
 FRIDA_THREAD_TOKENS[] frida

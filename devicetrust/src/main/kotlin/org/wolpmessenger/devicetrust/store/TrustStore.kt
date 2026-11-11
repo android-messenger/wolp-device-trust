@@ -2,6 +2,7 @@ package org.wolpmessenger.devicetrust.store
 
 import org.json.JSONArray
 import org.json.JSONObject
+import org.wolpmessenger.devicetrust.Journal
 import org.wolpmessenger.devicetrust.clock.ClockAnchor
 import org.wolpmessenger.devicetrust.io.AtomicFiles
 import java.io.ByteArrayInputStream
@@ -60,9 +61,32 @@ internal class TrustStore(dir: File) {
 
     private val lock = Any()
 
+    /**
+     * A file that cannot be parsed (writes are atomic, so this means damage from outside) is set
+     * aside as `state.json.corrupt` and the device starts over as `NOT_ENROLLED`: the start-up
+     * reconciliation then removes the device keys nothing points at, and the user enrolls again.
+     * Throwing here instead would crash the app on every start. A read error (IOException) is not
+     * damage and still propagates.
+     */
     fun load(): StoredState = synchronized(lock) {
         if (!stateFile.exists()) return StoredState()
-        fromJson(JSONObject(stateFile.readText()))
+        try {
+            fromJson(JSONObject(stateFile.readText()))
+        } catch (e: org.json.JSONException) {
+            setAside(e)
+        } catch (e: IllegalArgumentException) { // unknown Phase, bad base64
+            setAside(e)
+        } catch (e: java.time.format.DateTimeParseException) {
+            setAside(e)
+        }
+    }
+
+    private fun setAside(e: Exception): StoredState {
+        Journal.event("state_corrupt", e.javaClass.simpleName)
+        val aside = File(stateFile.parentFile, stateFile.name + ".corrupt")
+        aside.delete()
+        if (!stateFile.renameTo(aside)) stateFile.delete()
+        return StoredState()
     }
 
     fun save(state: StoredState): Unit = synchronized(lock) {

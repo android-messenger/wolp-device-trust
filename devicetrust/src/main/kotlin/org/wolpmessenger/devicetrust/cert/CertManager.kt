@@ -3,6 +3,7 @@ package org.wolpmessenger.devicetrust.cert
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import org.wolpmessenger.devicetrust.Journal
 import org.wolpmessenger.devicetrust.alert.AlertKind
 import org.wolpmessenger.devicetrust.alert.AlertSink
 import org.wolpmessenger.devicetrust.api.BlockReason
@@ -289,9 +290,13 @@ internal class CertManager(
      * and the sender is kicked (п. 7).
      */
     suspend fun raspBlock(findings: List<RaspFinding>) {
-        if (store.load().phase != Phase.BLOCKED) alerts.enqueue(AlertKind.BLOCK, findings)
+        // the message is best effort: a full disk or a broken queue must never stop the wipe
+        if (store.load().phase != Phase.BLOCKED) {
+            runCatching { alerts.enqueue(AlertKind.BLOCK, findings) }
+                .onFailure { Journal.event("block_alert_failed", it.javaClass.simpleName) }
+        }
         block(BlockReason.RASP)
-        alerts.schedule()
+        runCatching { alerts.schedule() }
     }
 
     /** Records the intent first, then destroys everything; safe to repeat. No message (S2 §8, last paragraph). */

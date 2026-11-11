@@ -106,8 +106,12 @@ internal class DeviceTrustCore(
         val r = rasp()
         if (r.blocking.isNotEmpty() && !certs.isBlocked()) {
             lock.withLock {
-                certs.raspBlock(r.blocking)
-                publish()
+                // two passes may overlap (start-up and coming to the foreground): the second one
+                // finds the device already blocked and must not wipe and emit again
+                if (!certs.isBlocked()) {
+                    certs.raspBlock(r.blocking)
+                    publish()
+                }
             }
         }
         return r
@@ -196,6 +200,9 @@ internal class DeviceTrustCore(
     fun sendAlerts(): Int = sender?.sendAll() ?: 0
 
     fun trustNow(): Instant? = clock.trustNow()
+
+    /** Library time: what every deadline of this class is measured against. */
+    fun now(): Instant = clock.now()
 
     fun deviceInfo(): DeviceSecurityInfo? = lastInfo
 

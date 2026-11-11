@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -251,11 +252,20 @@ class RaspTest {
         val r = engine().evaluate()
         assertEquals(
             setOf(RaspCheck.DEBUGGER to BLOCK, RaspCheck.HOOK_XPOSED to BLOCK, RaspCheck.APK_SIGNATURE to BLOCK, RaspCheck.APP_DEBUGGABLE to BLOCK,
-                RaspCheck.KEYSTORE_SOFTWARE to BLOCK, RaspCheck.ROOT_PROPS to BLOCK),
+                RaspCheck.KEYSTORE_SOFTWARE to BLOCK, RaspCheck.ROOT_TEST_KEYS to REPORT),
             ids(r),
         )
         assertEquals(setOf("tracer=4242", "jdwp"), r.findings.filter { it.id == RaspCheck.DEBUGGER }.map { it.detail }.toSet())
         assertEquals("unexpected=" + "bb".repeat(32), r.findings.first { it.id == RaspCheck.APK_SIGNATURE }.detail)
+    }
+
+    @Test
+    fun `test-keys alone never blocks - from Kotlin, from native or from both`() {
+        env.buildTags = "test-keys"
+        nativeOut = { NativeChecks.parse(nativeBytes(cleanNative + "ROOT_TEST_KEYS|F|ro.build.tags=test-keys\n"), key) }
+        val r = engine().evaluate()
+        assertTrue(r.blocking.isEmpty())
+        assertEquals(setOf(RaspCheck.ROOT_TEST_KEYS to REPORT), ids(r))
     }
 
     @Test

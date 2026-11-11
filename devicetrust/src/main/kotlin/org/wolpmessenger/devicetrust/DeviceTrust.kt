@@ -154,12 +154,26 @@ public object DeviceTrust {
         scope.launch { c.credentialsVersion.collect { http.onCredentialsChanged() } }
         Handler(Looper.getMainLooper()).post { ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundRasp(c, config)) }
         scope.launch {
-            c.initialize()
-            c.checkIntegrity()
-            RenewWorker.schedule(app, config.workInterval)
-            if (!queue.isEmpty()) AlertWorker.schedule(app)
-            c.ensureFresh()
+            // Each step on its own: an uncaught exception here would kill the process (no handler
+            // on this scope), and a failed step must not cancel the ones after it.
+            step("initialize") { c.initialize() }
+            // reconciliation failed half-way (e.g. Keystore unavailable): still leave `Uninitialized`
+            if (c.state.value is TrustState.Uninitialized) step("publish") { c.publish() }
+            step("integrity") { c.checkIntegrity() }
+            step("renew_worker") { RenewWorker.schedule(app, config.workInterval) }
+            step("alert_worker") { if (!queue.isEmpty()) AlertWorker.schedule(app) }
+            step("ensure_fresh") { c.ensureFresh() }
             deadlineTimer(c)
+        }
+    }
+
+    private suspend fun step(name: String, block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Journal.event("init_step_failed", "$name ${e.javaClass.simpleName}")
         }
     }
 
@@ -189,10 +203,12 @@ public object DeviceTrust {
      */
     private suspend fun deadlineTimer(c: DeviceTrustCore) {
         while (true) {
-            val next = c.nextDeadline()
-            val wait = next?.let { Duration.between(Instant.now(), it).toMillis() } ?: Long.MAX_VALUE
+            // deadlines are in library time (server-relative when known): compare with the same clock,
+            // not with Instant.now() — a phone clock that runs behind would never reach the deadline
+            val next = runCatching { c.nextDeadline() }.getOrNull()
+            val wait = next?.let { Duration.between(c.now(), it).toMillis() } ?: Long.MAX_VALUE
             delay(wait.coerceIn(1_000, 15 * 60_000))
-            if (next != null && !Instant.now().isBefore(next)) c.ensureFresh() else c.publish()
+            step("deadline") { if (next != null && !c.now().isBefore(next)) c.ensureFresh() else c.publish() }
         }
     }
 

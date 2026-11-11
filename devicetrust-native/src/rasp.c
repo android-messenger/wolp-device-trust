@@ -267,6 +267,21 @@ static void check_apk_signature(out_t *o, const uint8_t *expected, size_t n_expe
 
 // ------------------------------------------------------------------ native-only checks
 
+/**
+ * [token] as a whole space-delimited field of some line of [text] (mountinfo: the mount source of
+ * KernelSU / APatch overlays is exactly that word). A plain strstr would also hit any path that
+ * merely contains the letters.
+ */
+static int has_field(const char *text, const char *token) {
+    size_t n = strlen(token);
+    for (const char *p = text; (p = strstr(p, token)); p += n) {
+        int start_ok = p == text || p[-1] == ' ' || p[-1] == '\n';
+        int end_ok = p[n] == 0 || p[n] == ' ' || p[n] == '\n';
+        if (start_ok && end_ok) return 1;
+    }
+    return 0;
+}
+
 static void check_magisk(out_t *o) {
     char detail[256];
     for (size_t i = 0; i < OBF_MAGISK_PATHS_N; i++) {
@@ -287,6 +302,14 @@ static void check_magisk(out_t *o) {
             return;
         }
     }
+    for (size_t i = 0; i < OBF_MAGISK_MOUNT_FIELDS_N; i++) {
+        DEC(t, OBF_MAGISK_MOUNT_FIELDS[i]);
+        if (has_field(m, t)) {
+            free(m);
+            out_line(o, OBF_ID_ROOT_MAGISK, 'F', join(detail, OBF_MOUNTINFO_PREFIX, t));
+            return;
+        }
+    }
     free(m);
     out_line(o, OBF_ID_ROOT_MAGISK, 'C', "");
 }
@@ -297,10 +320,16 @@ static void check_props(out_t *o) {
     if (!strcmp(v, "1")) { out_line(o, OBF_ID_ROOT_PROPS, 'F', join(detail, OBF_DETAIL_DEBUGGABLE, "")); return; }
     prop(OBF_PROP_SECURE, v);
     if (!strcmp(v, "0")) { out_line(o, OBF_ID_ROOT_PROPS, 'F', join(detail, OBF_DETAIL_SECURE, "")); return; }
+    out_line(o, OBF_ID_ROOT_PROPS, 'C', "");
+}
+
+/** `test-keys` alone is weak (stock firmware of some vendors carries it): its own id, REPORT by default. */
+static void check_test_keys(out_t *o) {
+    char v[PROP_VALUE_MAX], detail[256];
     prop(OBF_PROP_BUILD_TAGS, v);
     DEC(tk, OBF_TEST_KEYS);
-    if (strstr(v, tk)) { out_line(o, OBF_ID_ROOT_PROPS, 'F', join(detail, OBF_DETAIL_TEST_KEYS, "")); return; }
-    out_line(o, OBF_ID_ROOT_PROPS, 'C', "");
+    int found = strstr(v, tk) != NULL;
+    out_line(o, OBF_ID_ROOT_TEST_KEYS, found ? 'F' : 'C', found ? join(detail, OBF_DETAIL_TEST_KEYS, "") : "");
 }
 
 static void check_frida_maps(out_t *o) {
@@ -409,6 +438,7 @@ static jbyteArray scan(JNIEnv *env, jclass cls, jbyteArray key, jbyteArray expec
     }
     check_magisk(&o);
     check_props(&o);
+    check_test_keys(&o);
     check_frida_maps(&o);
     check_frida_port(&o);
     if (!o.buf) return NULL;
