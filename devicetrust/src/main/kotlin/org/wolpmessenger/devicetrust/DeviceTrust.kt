@@ -106,7 +106,7 @@ public object DeviceTrust {
         val keys = KeystoreKeys.android()
         val clock = TrustClock(AndroidClockSource(app), store.load().clock)
         val gate = IntegrityGate()
-        val vault = EnvelopeVault.android(app) { gate.require() }
+        val vault = EnvelopeVault.android(app, gate = { gate.require() })
         val versionCodeEarly: Long = app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
         val precheckCache = FilePrecheckCache(File(dir, "precheck.properties"))
         val digests = KotlinChecks.normalize(config.expectedSigningDigests)
@@ -154,6 +154,7 @@ public object DeviceTrust {
                 override suspend fun provision() = vault.provision()
                 override fun keys() = vault.keys()
                 override suspend fun wipe() = vault.wipe()
+                override suspend fun migrate() = vault.migrate()
             },
             enroller = enroller,
             versions = { Versions(versionCode, Build.VERSION.SECURITY_PATCH) },
@@ -202,6 +203,7 @@ public object DeviceTrust {
             job = scope.launch {
                 while (true) {
                     runCatching { c.checkIntegrity() }
+                    runCatching { c.migrateVault() } // a no-op once done; the foreground is where the device is unlocked
                     delay(config.raspIntervalForeground.inWholeMilliseconds)
                 }
             }

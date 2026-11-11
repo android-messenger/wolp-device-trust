@@ -210,4 +210,166 @@ class VaultTest {
         gate.record(open = true)
         assertTrue(waiting.await().isNotEmpty())
     }
+
+    // ---------------------------------------------------------------- specs/001-rasp-hardening, story 2
+
+    /** A KEK the "system" refuses while the device is locked, like `dt.vault.u`. */
+    private inner class LockBoundKek : Kek by SoftKek() {
+        private val soft = SoftKek()
+        var invalidated = false
+        override fun exists() = soft.exists()
+        override fun create() = soft.create()
+        override fun delete() = soft.delete()
+        override fun encrypt(plain: ByteArray, aad: ByteArray): ByteArray {
+            if (deviceLocked) throw java.security.InvalidKeyException("Device locked")
+            return soft.encrypt(plain, aad)
+        }
+        override fun decrypt(ivCiphertextTag: ByteArray, aad: ByteArray): ByteArray {
+            if (deviceLocked) throw java.security.InvalidKeyException("Device locked")
+            return soft.decrypt(ivCiphertextTag, aad)
+        }
+    }
+
+    private var deviceLocked = false
+    private var screenLockSet = true
+    /** What the library believes; a test may leave it stale to model a lock it has not noticed. */
+    private var believedUnlocked = true
+    private val screen = object : org.wolpmessenger.devicetrust.vault.ScreenLock {
+        override fun isSecure() = screenLockSet
+        override fun isUnlockedNow() = believedUnlocked
+    }
+    private val boundKek by lazy { LockBoundKek() }
+    private val boundFile by lazy { File(tmp.root, "dt/dek-u.bin") }
+    private fun vault2() = EnvelopeVault(kek, dekFile, UnlockState { unlocked }, SecureRandom(), {}, boundKek, boundFile, screen)
+    private fun lock() { deviceLocked = true; believedUnlocked = false }
+    private fun unlockDevice() { deviceLocked = false; believedUnlocked = true }
+
+    @Test
+    fun `two keys - E2EE only while unlocked, push and names also behind the lock screen`() = runTest {
+        val v = vault2()
+        assertTrue(v.provision())
+        assertEquals(VaultKeys.PRESENT, v.keys())
+        val secret = v.wrap("ratchet".toByteArray(), VaultPurpose.E2EE)
+        val push = v.wrap("push".toByteArray(), VaultPurpose.PUSH_KEY)
+
+        lock()
+        v.evictUnlockedKey() // what screen-off does
+        assertVault<VaultException.Locked> { v.unwrap(secret, VaultPurpose.E2EE) }
+        assertVault<VaultException.Locked> { v.wrap(byteArrayOf(1), VaultPurpose.E2EE_PLAINTEXT) }
+        assertArrayEquals("push".toByteArray(), v.unwrap(push, VaultPurpose.PUSH_KEY))
+        assertArrayEquals("n".toByteArray(), v.unwrap(v.wrap("n".toByteArray(), VaultPurpose.NAMES), VaultPurpose.NAMES))
+
+        unlockDevice()
+        assertArrayEquals("ratchet".toByteArray(), v.unwrap(secret, VaultPurpose.E2EE))
+        // a new process (nothing in memory) behind the lock screen: push yes, E2EE no
+        lock()
+        val cold = vault2()
+        assertArrayEquals("push".toByteArray(), cold.unwrap(push, VaultPurpose.PUSH_KEY))
+        assertVault<VaultException.Locked> { cold.unwrap(secret, VaultPurpose.E2EE) }
+        assertEquals("nothing was destroyed", VaultKeys.PRESENT, cold.keys())
+    }
+
+    @Test
+    fun `the background key cannot open E2EE blobs`() = runTest {
+        val v = vault2()
+        v.provision()
+        val secret = v.wrap("ratchet".toByteArray(), VaultPurpose.E2EE)
+        // an attacker with the background KEK and both files, but no unlocked-device KEK
+        val stolen = EnvelopeVault(kek, dekFile, UnlockState { true })
+        assertVault<VaultException.Corrupt> { stolen.unwrap(secret, VaultPurpose.E2EE) } // the background DEK is the wrong key
+        val dekBytes = kek.decrypt(dekFile.readBytes().let { it.copyOfRange(1, it.size) }, "wolp-dek-v1".toByteArray())
+        val bound = boundKek.decrypt(boundFile.readBytes().let { it.copyOfRange(1, it.size) }, "wolp-dek-u-v1".toByteArray())
+        assertFalse("two independent DEKs", dekBytes.contentEquals(bound))
+    }
+
+    @Test
+    fun `a lock the library has not noticed yet - the system refusal is Locked, never KeyGone`() = runTest {
+        val v = vault2()
+        v.provision()
+        val secret = v.wrap("ratchet".toByteArray(), VaultPurpose.E2EE)
+        v.evictUnlockedKey()
+        deviceLocked = true // believedUnlocked stays true
+        assertVault<VaultException.Locked> { v.unwrap(secret, VaultPurpose.E2EE) }
+        deviceLocked = false
+        assertArrayEquals("ratchet".toByteArray(), v.unwrap(secret, VaultPurpose.E2EE))
+    }
+
+    @Test
+    fun `screen lock removed - the E2EE half is destroyed, the background half stays`() = runTest {
+        val v = vault2()
+        v.provision()
+        val secret = v.wrap("ratchet".toByteArray(), VaultPurpose.E2EE)
+        val push = v.wrap("push".toByteArray(), VaultPurpose.PUSH_KEY)
+        v.evictUnlockedKey()
+        screenLockSet = false
+        assertVault<VaultException.KeyGone> { v.unwrap(secret, VaultPurpose.E2EE) }
+        assertFalse(boundFile.exists())
+        assertFalse(boundKek.exists())
+        assertEquals(VaultKeys.PARTIAL, v.keys()) // → the start-up reconciliation makes a new vault (VaultReset)
+        assertArrayEquals("push".toByteArray(), v.unwrap(push, VaultPurpose.PUSH_KEY))
+
+        assertVault<VaultException.Locked> { v.provision() } // not without a screen lock
+        screenLockSet = true
+        assertTrue(v.provision())
+        assertVault<VaultException.Corrupt> { v.unwrap(secret, VaultPurpose.E2EE) } // new keys: the old history is gone
+    }
+
+    @Test
+    fun `an older single-key vault moves to two keys without losing E2EE blobs`() = runTest {
+        val old = vault() // the layout before story 2
+        old.provision()
+        val secret = old.wrap("ratchet".toByteArray(), VaultPurpose.E2EE)
+        val plain = old.wrap("history".toByteArray(), VaultPurpose.E2EE_PLAINTEXT)
+        val push = old.wrap("push".toByteArray(), VaultPurpose.PUSH_KEY)
+
+        // behind the lock screen nothing moves, and everything works as before
+        lock()
+        val waiting = vault2()
+        assertEquals(VaultKeys.PRESENT, waiting.keys())
+        assertFalse(waiting.migrate())
+        assertArrayEquals("ratchet".toByteArray(), waiting.unwrap(secret, VaultPurpose.E2EE))
+        assertArrayEquals("push".toByteArray(), waiting.unwrap(push, VaultPurpose.PUSH_KEY))
+
+        unlockDevice()
+        val v = vault2()
+        assertTrue(v.migrate())
+        assertFalse("once", v.migrate())
+        assertEquals(VaultKeys.PRESENT, v.keys())
+        assertArrayEquals("ratchet".toByteArray(), v.unwrap(secret, VaultPurpose.E2EE))
+        assertArrayEquals("history".toByteArray(), v.unwrap(plain, VaultPurpose.E2EE_PLAINTEXT))
+        assertVault<VaultException.Corrupt> { v.unwrap(push, VaultPurpose.PUSH_KEY) } // re-created by the app
+
+        // from now on the E2EE blobs are out of reach behind the lock screen, in a new process too
+        lock()
+        val cold = vault2()
+        assertVault<VaultException.Locked> { cold.unwrap(secret, VaultPurpose.E2EE) }
+        assertArrayEquals("p2".toByteArray(), cold.unwrap(cold.wrap("p2".toByteArray(), VaultPurpose.PUSH_KEY), VaultPurpose.PUSH_KEY))
+        // …and the old DEK is no longer under the background KEK
+        val nowOpen = kek.decrypt(dekFile.readBytes().let { it.copyOfRange(1, it.size) }, "wolp-dek-v1".toByteArray())
+        unlockDevice()
+        val e2ee = boundKek.decrypt(boundFile.readBytes().let { it.copyOfRange(1, it.size) }, "wolp-dek-u-v1".toByteArray())
+        assertFalse(nowOpen.contentEquals(e2ee))
+    }
+
+    @Test
+    fun `migration interrupted after the E2EE half was written is finished on the next try`() = runTest {
+        val old = vault()
+        old.provision()
+        val secret = old.wrap("ratchet".toByteArray(), VaultPurpose.E2EE)
+        val legacyFile = dekFile.readBytes()
+        vault2().migrate()
+        dekFile.writeBytes(legacyFile) // as if the process died before dek.bin was replaced
+        val v = vault2()
+        assertTrue(v.migrate())
+        assertArrayEquals("ratchet".toByteArray(), v.unwrap(secret, VaultPurpose.E2EE))
+    }
+
+    @Test
+    fun `wipe destroys both halves`() = runTest {
+        val v = vault2()
+        v.provision()
+        v.wipe()
+        assertEquals(VaultKeys.MISSING, v.keys())
+        assertFalse(dekFile.exists() || boundFile.exists() || kek.exists() || boundKek.exists())
+    }
 }

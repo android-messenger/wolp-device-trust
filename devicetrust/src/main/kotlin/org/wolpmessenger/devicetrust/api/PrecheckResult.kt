@@ -7,6 +7,9 @@ public enum class UnsupportedReason {
 
     /** `SECURITY_PATCH` is older than `maxPatchAgeMonths`, or unparseable (S2 §6.1 п. 3). */
     PATCH_TOO_OLD,
+
+    /** No PIN, pattern or password: the E2EE key is bound to the lock screen, so there must be one. */
+    NO_SCREEN_LOCK,
 }
 
 /** Outcome of [org.wolpmessenger.devicetrust.attest.Precheck] (S2 §6.1). */

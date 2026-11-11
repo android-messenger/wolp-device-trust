@@ -32,7 +32,9 @@ public fun interface RaspScanner {
  * 2. Keystore level of a device-shaped key (`dt.precheck`, generated and deleted at once),
  *    cached per process and per (boot, app version);
  * 3. `SECURITY_PATCH` age;
- * 4. no screen lock → a REPORT finding (`NO_SCREEN_LOCK`, S2 §7.1), not a refusal.
+ * 4. no screen lock → [PrecheckResult.Unsupported] (`NO_SCREEN_LOCK`): the E2EE key of the Vault is
+ *    bound to the lock screen (specs/001-rasp-hardening FR-009). On an enrolled device RASP still
+ *    reports `NO_SCREEN_LOCK` (S2 §7.1).
  *
  * Concurrent calls are serialised; the Keystore probe runs at most once per process.
  */
@@ -65,6 +67,7 @@ public class Precheck internal constructor(
         val reasons = buildList {
             if (!keystore.level.isHardwareConfirmed) add(UnsupportedReason.SOFTWARE_KEYSTORE)
             if (!patchFresh(env.securityPatch)) add(UnsupportedReason.PATCH_TOO_OLD)
+            if (!screenLock) add(UnsupportedReason.NO_SCREEN_LOCK)
         }
         if (reasons.isNotEmpty()) return@withLock PrecheckResult.Unsupported(reasons, info)
 

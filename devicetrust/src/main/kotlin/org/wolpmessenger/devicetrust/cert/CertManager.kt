@@ -44,6 +44,9 @@ internal interface VaultOps {
     suspend fun provision(): Boolean
     fun keys(): VaultKeys
     suspend fun wipe()
+
+    /** Moves a single-key vault to the two-key layout when possible; true if it did (EnvelopeVault.migrate). */
+    suspend fun migrate(): Boolean = false
 }
 
 /** Versions recorded with `UpdateRequired` (S2 §6.6 п. 5). */
@@ -392,12 +395,26 @@ internal class CertManager(
 
         // 4. device key present but the Vault is gone → new Vault, the web app re-initialises E2EE
         if (s.phase == Phase.ENROLLED && s.active != null && vault.keys() != VaultKeys.PRESENT) {
-            vault.provision()
-            emit(TrustEvent.VaultReset)
+            // needs an unlocked device with a screen lock now: when that is not the case (a start
+            // from a push behind the lock screen) the next start tries again
+            if (runCatching { vault.provision() }.isSuccess) emit(TrustEvent.VaultReset)
         }
+        migrateVault()
 
         // 5. UpdateRequired is lifted once the app or the OS has been updated
         clearUpdateRequiredIfUpdated()
+    }
+
+    /** Story 2: an existing single-key vault moves its E2EE half under the unlocked-device key; safe to call often. */
+    suspend fun migrateVault() {
+        if (store.load().phase != Phase.ENROLLED) return
+        val moved = try {
+            vault.migrate()
+        } catch (e: Exception) {
+            Journal.event("vault_migrate_failed", e.javaClass.simpleName)
+            false
+        }
+        if (moved) emit(TrustEvent.BackgroundKeysReset)
     }
 
     private fun dropEnrolling() {

@@ -70,12 +70,19 @@ class PrecheckTest {
     }
 
     @Test
-    fun `no screen lock is a REPORT, RASP reports pass through`() = runTest {
-        env.secure = false
+    fun `RASP reports pass through`() = runTest {
         rasp = RaspReport(listOf(RaspFinding("DEV_OPTIONS", RaspReaction.REPORT)))
         val r = precheck().run() as PrecheckResult.Supported
-        assertEquals(listOf("DEV_OPTIONS", Precheck.NO_SCREEN_LOCK), r.reports.map { it.id })
-        assertFalse(r.info.screenLockSecure)
+        assertEquals(listOf("DEV_OPTIONS"), r.reports.map { it.id })
+    }
+
+    /** specs/001-rasp-hardening FR-009: the E2EE key is bound to the lock screen, so there must be one. */
+    @Test
+    fun `no screen lock - the device is not supported`() = runTest {
+        env.secure = false
+        val r = precheck().run() as PrecheckResult.Unsupported
+        assertEquals(listOf(org.wolpmessenger.devicetrust.api.UnsupportedReason.NO_SCREEN_LOCK), r.reasons)
+        assertFalse(r.info!!.screenLockSecure)
     }
 
     @Test

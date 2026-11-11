@@ -117,6 +117,9 @@ internal class DeviceTrustCore(
         return r
     }
 
+    /** Story 2 migration of an older vault; needs the device unlocked, so it is retried whenever the app comes to the foreground. */
+    suspend fun migrateVault() = lock.withLock { certs.migrateVault() }
+
     /** S2 §6.5a: completes locally in every state (R5). */
     suspend fun unenroll(): UnenrollResult = lock.withLock {
         certs.unenroll().also { publish() }
