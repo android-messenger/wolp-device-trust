@@ -46,9 +46,11 @@ import org.wolpmessenger.devicetrust.attest.Precheck
 import org.wolpmessenger.devicetrust.attest.RaspScanner
 import org.wolpmessenger.devicetrust.rasp.AndroidRaspEnv
 import org.wolpmessenger.devicetrust.rasp.EffectivePolicy
+import org.wolpmessenger.devicetrust.rasp.IntegrityGate
 import org.wolpmessenger.devicetrust.rasp.KotlinChecks
 import org.wolpmessenger.devicetrust.rasp.NativeChecks
 import org.wolpmessenger.devicetrust.rasp.RaspEngine
+import org.wolpmessenger.devicetrust.rasp.RaspSummaryStore
 import org.wolpmessenger.devicetrust.cert.CertManager
 import org.wolpmessenger.devicetrust.cert.RenewWorker
 import org.wolpmessenger.devicetrust.cert.VaultOps
@@ -104,7 +106,8 @@ public object DeviceTrust {
         val store = TrustStore(dir)
         val keys = KeystoreKeys.android()
         val clock = TrustClock(AndroidClockSource(app), store.load().clock)
-        val vault = EnvelopeVault.android(app)
+        val gate = IntegrityGate()
+        val vault = EnvelopeVault.android(app, gate = { gate.require() })
         val versionCodeEarly: Long = app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
         val precheckCache = FilePrecheckCache(File(dir, "precheck.properties"))
         val digests = KotlinChecks.normalize(config.expectedSigningDigests)
@@ -113,9 +116,26 @@ public object DeviceTrust {
             NativeChecks(digests)::scan,
             EffectivePolicy(config, debuggable, versionCodeEarly),
         )
+        val summary = RaspSummaryStore(File(dir, "rasp-summary.json"), clock::now)
         lateinit var alertsRef: Alerts
         // every RASP pass queues its REPORT findings (rate-limited, S2 §7.4)
-        val scanner = RaspScanner { engine.scan().also { r -> if (r.reports.isNotEmpty()) alertsRef.report(r.reports) } }
+        // …and decides whether the Vault may hand out secrets: every pass goes through here (start-up,
+        // foreground, precheck, renewal), so the gate always reflects the latest one
+        val scanner = RaspScanner {
+            val r = try {
+                engine.scan()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                gate.record(open = false) // a pass that could not run proves nothing
+                throw e
+            }
+            gate.record(engine.allowsSecrets(r))
+            // counted for the summary sent with the next renewal (FR-035); a full disk must not fail the pass
+            runCatching { summary.record(r, engine.nativeRan) }.onFailure { Journal.event("rasp_summary_failed", it.javaClass.simpleName) }
+            if (r.reports.isNotEmpty()) alertsRef.report(r.reports)
+            r
+        }
         val precheck = Precheck.android(app, config, scanner)
         val onServerDate: (String?) -> Unit = { date -> clock.onPinnedResponse(date)?.let { anchor -> store.update { it.copy(clock = anchor) } } }
         val http = DeviceHttp(config, current = { core?.clientCredentials() }, onServerDate = onServerDate)
@@ -130,7 +150,7 @@ public object DeviceTrust {
         val precheckReacting: suspend () -> PrecheckResult = {
             precheck.run().also { if (it is PrecheckResult.Compromised) certs.raspBlock(it.report.blocking) }
         }
-        val enroller = Enroller(config, precheckReacting, keys, gateway, store, { vault.provision() }, { versionCode }, clock::now)
+        val enroller = Enroller(config, precheckReacting, keys, gateway, store, { vault.provision() }, { versionCode }, clock::now, onEnrolled = summary::reset)
         certs = CertManager(
             config, store, keys, clock, gateway, pinned,
             mtlsFor = { creds -> HttpClients.mtls(pinned, creds) },
@@ -138,12 +158,14 @@ public object DeviceTrust {
                 override suspend fun provision() = vault.provision()
                 override fun keys() = vault.keys()
                 override suspend fun wipe() = vault.wipe()
+                override suspend fun migrate() = vault.migrate()
             },
             enroller = enroller,
             versions = { Versions(versionCode, Build.VERSION.SECURITY_PATCH) },
             emit = { eventQueue.trySend(it) },
             integrity = scanner::scan,
             alerts = alerts,
+            summary = summary,
         )
         val sender = AlertSender(queue, alerts, gateway, config.cookieProvider, clock::now)
         val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink, sender, appClient = { http.client }, gateway = gateway, rasp = scanner::scan)
@@ -154,12 +176,26 @@ public object DeviceTrust {
         scope.launch { c.credentialsVersion.collect { http.onCredentialsChanged() } }
         Handler(Looper.getMainLooper()).post { ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundRasp(c, config)) }
         scope.launch {
-            c.initialize()
-            c.checkIntegrity()
-            RenewWorker.schedule(app, config.workInterval)
-            if (!queue.isEmpty()) AlertWorker.schedule(app)
-            c.ensureFresh()
+            // Each step on its own: an uncaught exception here would kill the process (no handler
+            // on this scope), and a failed step must not cancel the ones after it.
+            step("initialize") { c.initialize() }
+            // reconciliation failed half-way (e.g. Keystore unavailable): still leave `Uninitialized`
+            if (c.state.value is TrustState.Uninitialized) step("publish") { c.publish() }
+            step("integrity") { c.checkIntegrity() }
+            step("renew_worker") { RenewWorker.schedule(app, config.workInterval) }
+            step("alert_worker") { if (!queue.isEmpty()) AlertWorker.schedule(app) }
+            step("ensure_fresh") { c.ensureFresh() }
             deadlineTimer(c)
+        }
+    }
+
+    private suspend fun step(name: String, block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Journal.event("init_step_failed", "$name ${e.javaClass.simpleName}")
         }
     }
 
@@ -172,6 +208,7 @@ public object DeviceTrust {
             job = scope.launch {
                 while (true) {
                     runCatching { c.checkIntegrity() }
+                    runCatching { c.migrateVault() } // a no-op once done; the foreground is where the device is unlocked
                     delay(config.raspIntervalForeground.inWholeMilliseconds)
                 }
             }
@@ -189,10 +226,12 @@ public object DeviceTrust {
      */
     private suspend fun deadlineTimer(c: DeviceTrustCore) {
         while (true) {
-            val next = c.nextDeadline()
-            val wait = next?.let { Duration.between(Instant.now(), it).toMillis() } ?: Long.MAX_VALUE
+            // deadlines are in library time (server-relative when known): compare with the same clock,
+            // not with Instant.now() — a phone clock that runs behind would never reach the deadline
+            val next = runCatching { c.nextDeadline() }.getOrNull()
+            val wait = next?.let { Duration.between(c.now(), it).toMillis() } ?: Long.MAX_VALUE
             delay(wait.coerceIn(1_000, 15 * 60_000))
-            if (next != null && !Instant.now().isBefore(next)) c.ensureFresh() else c.publish()
+            step("deadline") { if (next != null && !c.now().isBefore(next)) c.ensureFresh() else c.publish() }
         }
     }
 

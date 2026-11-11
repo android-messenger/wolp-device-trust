@@ -21,7 +21,7 @@ internal class KotlinChecks(private val env: RaspEnv, private val expectedDigest
     fun single(): List<RawFinding> = buildList {
         if (env.isDebuggerConnected()) add(RawFinding(RaspCheck.DEBUGGER, "jdwp"))
         env.installedPackages(ROOT_MANAGERS).forEach { add(RawFinding(RaspCheck.ROOT_MANAGER_PKG, it)) }
-        if ("test-keys" in env.buildTags) add(RawFinding(RaspCheck.ROOT_PROPS, "Build.TAGS=test-keys"))
+        if ("test-keys" in env.buildTags) add(RawFinding(RaspCheck.ROOT_TEST_KEYS, "Build.TAGS=test-keys"))
         xposed()?.let { add(RawFinding(RaspCheck.HOOK_XPOSED, it)) }
         if (env.appDebuggable) add(RawFinding(RaspCheck.APP_DEBUGGABLE))
         env.keystoreLevel()?.takeIf { !it.isHardwareConfirmed }?.let { add(RawFinding(RaspCheck.KEYSTORE_SOFTWARE, it.name)) }

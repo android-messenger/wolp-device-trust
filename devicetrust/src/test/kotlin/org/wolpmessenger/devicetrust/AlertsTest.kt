@@ -306,4 +306,67 @@ class AlertsTest {
         val (_, p) = decode(take())
         assertEquals("DEBUGGER", p.getJSONArray("checks").getJSONObject(0).getString("id"))
     }
+
+    // ---------------------------------------------------------------- specs/001-rasp-hardening, story 1
+
+    @Test
+    fun `sender - a message refused for itself does not hold back the BLOCK behind it`() = runTest {
+        // an unsigned REPORT from before enrollment, then enrollment and a signed BLOCK
+        alerts.enqueue(AlertKind.REPORT, listOf(RaspFinding("DEV_OPTIONS", RaspReaction.REPORT)))
+        clock.set(t0.plusSeconds(1))
+        enrolledWithK1()
+        certs.raspBlock(listOf(blockFinding()))
+        cookie = "ory_kratos_session=expired"
+
+        server.enqueue(MockResponse().setResponseCode(401).setHeader("X-Device-Deny", "NO_SESSION"))
+        server.enqueue(accepted())
+        assertEquals("the refused one stays for a later pass", 1, sender.sendAll())
+        decode(take(), signedBy = null)
+        val (_, p) = decode(take())
+        assertEquals("BLOCK", p.getString("kind"))
+        assertEquals(AlertKind.REPORT, queue.list().single().kind)
+    }
+
+    @Test
+    fun `BLOCK still wipes when the message cannot be queued`() = runTest {
+        enrolledWithK1()
+        val broken = object : org.wolpmessenger.devicetrust.alert.AlertSink {
+            override fun enqueue(kind: AlertKind, checks: List<RaspFinding>): Boolean = throw java.io.IOException("disk full")
+            override fun report(findings: List<RaspFinding>) = Unit
+            override fun schedule(): Unit = throw IllegalStateException("no WorkManager")
+        }
+        val c = CertManager(config, store, keys, trustClock, gateway, OkHttpClient(), { OkHttpClient() }, vault, enroller,
+            { Versions(10300, "2026-10-01") }, { events += it }, { rasp }, broken)
+        c.raspBlock(listOf(blockFinding()))
+        assertEquals(Phase.BLOCKED, store.load().phase)
+        assertNull(store.load().active)
+        assertTrue("device keys are gone", keys.deviceKeyAliases().isEmpty())
+        assertEquals(listOf<TrustEvent>(TrustEvent.Blocked(BlockReason.RASP)), events)
+    }
+
+    @Test
+    fun `overlapping RASP passes run the BLOCK reaction once`() = runTest {
+        enrolledWithK1()
+        val blocking = RaspReport(listOf(blockFinding()))
+        val c = DeviceTrustCore(config, store, trustClock, precheck, enroller, certs, MutableSharedFlow(extraBufferCapacity = 16), sender, rasp = { blocking })
+        c.checkIntegrity()
+        c.checkIntegrity()
+        assertEquals(1, events.size)
+        assertEquals(1, queue.list().size)
+    }
+
+    @Test
+    fun `a damaged state file does not throw - it is set aside and the device starts over`() {
+        enrolledWithK1()
+        val file = java.io.File(tmp.root, "state.json")
+        file.writeText("{\"v\":1,\"phase\":\"ENROL")
+        assertEquals(Phase.NOT_ENROLLED, store.load().phase)
+        assertFalse(file.exists())
+        assertTrue(java.io.File(tmp.root, "state.json.corrupt").exists())
+
+        file.writeText("{\"v\":1,\"phase\":\"NO_SUCH_PHASE\"}")
+        assertEquals(Phase.NOT_ENROLLED, store.load().phase)
+        store.update { it.copy(deviceId = "x") } // usable again
+        assertEquals("x", store.load().deviceId)
+    }
 }

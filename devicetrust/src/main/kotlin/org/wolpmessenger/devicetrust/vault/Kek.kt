@@ -1,6 +1,11 @@
 package org.wolpmessenger.devicetrust.vault
 
 import android.content.Context
+import android.app.KeyguardManager
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.PowerManager
 import android.os.UserManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -27,7 +32,11 @@ internal interface Kek {
     fun decrypt(ivCiphertextTag: ByteArray, aad: ByteArray): ByteArray
 }
 
-internal class AndroidKek(private val alias: String = KeystoreKeys.VAULT_ALIAS) : Kek {
+internal class AndroidKek(
+    private val alias: String = KeystoreKeys.VAULT_ALIAS,
+    /** The system Keystore refuses the key while the device is locked (measured: specs/001-rasp-hardening/device-matrix.md). */
+    private val unlockedDeviceRequired: Boolean = false,
+) : Kek {
     private fun keyStore() = KeyStore.getInstance(PROVIDER).apply { load(null) }
     private fun key(): SecretKey = keyStore().getKey(alias, null) as SecretKey
 
@@ -39,7 +48,7 @@ internal class AndroidKek(private val alias: String = KeystoreKeys.VAULT_ALIAS) 
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
             .setUserAuthenticationRequired(false)
-            .setUnlockedDeviceRequired(false)
+            .setUnlockedDeviceRequired(unlockedDeviceRequired)
             .build()
         KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER).apply { init(spec) }.generateKey()
     }
@@ -78,5 +87,59 @@ internal fun interface UnlockState {
             val um = context.applicationContext.getSystemService(UserManager::class.java)
             return UnlockState { um.isUserUnlocked }
         }
+    }
+}
+
+/** What the E2EE half of the Vault needs to know about the lock screen (specs/001-rasp-hardening, story 2). */
+internal interface ScreenLock {
+    /** A PIN, pattern or password is set. */
+    fun isSecure(): Boolean
+
+    /** The device is unlocked and in use right now; false from screen-off until that is known again. */
+    fun isUnlockedNow(): Boolean
+
+    /** No lock-screen knowledge (JVM tests of the unrelated parts, single-key vaults). */
+    object Unknown : ScreenLock {
+        override fun isSecure() = true
+        override fun isUnlockedNow() = true
+    }
+}
+
+/**
+ * Lock-screen state from the platform. Screen-off raises a doubt and calls [onScreenOff] (the
+ * Vault drops the E2EE key from memory there): the device locks a few seconds later, and a key
+ * loaded in between would stay in memory behind the lock. The doubt is cleared by the unlock
+ * broadcast, or by asking the keyguard when the Vault is used next.
+ */
+internal class AndroidScreenLock(context: Context, private val onScreenOff: () -> Unit) : ScreenLock {
+    private val app = context.applicationContext
+    private val keyguard = app.getSystemService(KeyguardManager::class.java)
+    private val power = app.getSystemService(PowerManager::class.java)
+
+    @Volatile
+    private var doubt = true // unknown at process start
+
+    init {
+        val filter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_USER_PRESENT) }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                if (intent.action == Intent.ACTION_SCREEN_OFF) {
+                    doubt = true
+                    onScreenOff()
+                } else {
+                    doubt = false
+                }
+            }
+        }
+        app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+    }
+
+    override fun isSecure(): Boolean = keyguard.isDeviceSecure
+
+    override fun isUnlockedNow(): Boolean {
+        if (!doubt) return true
+        val ok = power.isInteractive && !keyguard.isDeviceLocked
+        if (ok) doubt = false
+        return ok
     }
 }

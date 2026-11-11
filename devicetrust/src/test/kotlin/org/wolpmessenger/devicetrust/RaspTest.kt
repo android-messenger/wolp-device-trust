@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -251,11 +252,79 @@ class RaspTest {
         val r = engine().evaluate()
         assertEquals(
             setOf(RaspCheck.DEBUGGER to BLOCK, RaspCheck.HOOK_XPOSED to BLOCK, RaspCheck.APK_SIGNATURE to BLOCK, RaspCheck.APP_DEBUGGABLE to BLOCK,
-                RaspCheck.KEYSTORE_SOFTWARE to BLOCK, RaspCheck.ROOT_PROPS to BLOCK),
+                RaspCheck.KEYSTORE_SOFTWARE to BLOCK, RaspCheck.ROOT_TEST_KEYS to REPORT),
             ids(r),
         )
         assertEquals(setOf("tracer=4242", "jdwp"), r.findings.filter { it.id == RaspCheck.DEBUGGER }.map { it.detail }.toSet())
         assertEquals("unexpected=" + "bb".repeat(32), r.findings.first { it.id == RaspCheck.APK_SIGNATURE }.detail)
+    }
+
+    @Test
+    fun `test-keys alone never blocks - from Kotlin, from native or from both`() {
+        env.buildTags = "test-keys"
+        nativeOut = { NativeChecks.parse(nativeBytes(cleanNative + "ROOT_TEST_KEYS|F|ro.build.tags=test-keys\n"), key) }
+        val r = engine().evaluate()
+        assertTrue(r.blocking.isEmpty())
+        assertEquals(setOf(RaspCheck.ROOT_TEST_KEYS to REPORT), ids(r))
+    }
+
+    // ---------------------------------------------------------------- specs/001-rasp-hardening, story 3
+
+    @Test
+    fun `a heuristic BLOCK seen once and gone in the second pass is only reported`() {
+        env.status = "TracerPid:\t4242\n"
+        var call = 0
+        nativeOut = {
+            val first = call++ == 0
+            env.status = "TracerPid:\t0\n" // gone by the time of the second pass
+            NativeChecks.parse(nativeBytes(if (first) cleanNative.replace("DEBUGGER|C|", "DEBUGGER|F|tracer=4242") else cleanNative), key)
+        }
+        val e = engine()
+        val r = e.confirmed()
+        assertTrue(r.blocking.isEmpty())
+        assertEquals(listOf(RaspCheck.DEBUGGER to REPORT), r.findings.map { it.id to it.reaction })
+        assertEquals("unconfirmed;BLOCK;tracer=4242", r.findings.single().detail)
+        assertTrue("nothing wiping: secrets allowed", e.allowsSecrets(r))
+    }
+
+    @Test
+    fun `a heuristic BLOCK that is still there in the second pass blocks`() {
+        env.present += "/system/xbin/su"
+        var calls = 0
+        nativeOut = { calls++; NativeChecks.parse(nativeBytes(cleanNative.replace("ROOT_SU|C|", "ROOT_SU|F|/system/xbin/su")), key) }
+        val e = engine()
+        val r = e.confirmed()
+        assertEquals(2, calls)
+        assertEquals(setOf(RaspCheck.ROOT_SU to BLOCK), ids(r))
+        assertFalse(e.allowsSecrets(r))
+    }
+
+    @Test
+    fun `checks that cannot flicker block on the first pass`() {
+        env.signers = listOf("bb".repeat(32))
+        var calls = 0
+        nativeOut = { calls++; NativeChecks.parse(nativeBytes(cleanNative.replace("APK_SIGNATURE|C|", "APK_SIGNATURE|F|unexpected=" + "bb".repeat(32))), key) }
+        val r = engine().confirmed()
+        assertEquals("no second pass", 1, calls)
+        assertEquals(setOf(RaspCheck.APK_SIGNATURE to BLOCK), ids(r))
+    }
+
+    @Test
+    fun `release - checks that did not run do not unlock secrets, pilot and debug still do`() {
+        nativeOut = { NativeResult.Tampered("native unavailable") }
+        val release = engine()
+        val r = release.confirmed()
+        assertTrue("still only a report", r.blocking.isEmpty())
+        assertFalse(release.allowsSecrets(r))
+
+        env.versionCode = 10295
+        val pilot = engine(config(kind = BuildKind.PILOT))
+        assertTrue(pilot.allowsSecrets(pilot.confirmed()))
+
+        nativeOut = { NativeChecks.parse(nativeBytes(cleanNative), key) }
+        env.versionCode = 10300
+        val ok = engine()
+        assertTrue(ok.allowsSecrets(ok.confirmed()))
     }
 
     @Test

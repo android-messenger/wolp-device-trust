@@ -3,6 +3,7 @@ package org.wolpmessenger.devicetrust.cert
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import org.wolpmessenger.devicetrust.Journal
 import org.wolpmessenger.devicetrust.alert.AlertKind
 import org.wolpmessenger.devicetrust.alert.AlertSink
 import org.wolpmessenger.devicetrust.api.BlockReason
@@ -26,6 +27,9 @@ import org.wolpmessenger.devicetrust.net.GatewayClient
 import org.wolpmessenger.devicetrust.net.GatewayError
 import org.wolpmessenger.devicetrust.net.GatewayResult
 import org.wolpmessenger.devicetrust.net.IssuedCert
+import org.wolpmessenger.devicetrust.rasp.RaspSummary
+import org.wolpmessenger.devicetrust.rasp.RaspSummarySource
+import org.wolpmessenger.devicetrust.rasp.RaspSummaryStore
 import org.wolpmessenger.devicetrust.store.ActiveCert
 import org.wolpmessenger.devicetrust.store.Phase
 import org.wolpmessenger.devicetrust.store.StoredState
@@ -43,6 +47,9 @@ internal interface VaultOps {
     suspend fun provision(): Boolean
     fun keys(): VaultKeys
     suspend fun wipe()
+
+    /** Moves a single-key vault to the two-key layout when possible; true if it did (EnvelopeVault.migrate). */
+    suspend fun migrate(): Boolean = false
 }
 
 /** Versions recorded with `UpdateRequired` (S2 §6.6 п. 5). */
@@ -91,6 +98,7 @@ internal class CertManager(
     private val emit: (TrustEvent) -> Unit,
     private val integrity: suspend () -> RaspReport = { RaspReport.CLEAN },
     private val alerts: AlertSink = AlertSink.None,
+    private val summary: RaspSummarySource = RaspSummarySource.None,
 ) {
     fun isBlocked(): Boolean = store.load().phase == Phase.BLOCKED
 
@@ -121,7 +129,7 @@ internal class CertManager(
             is GatewayResult.Refused -> return onDenied(r.error, s)
             is GatewayResult.Failed -> return
         }
-        when (val r = rotate(s, ContinuitySig.RENEW, challenge) { csr, chain, sig -> gateway.renew(oldClient, csr, chain, sig) }) {
+        when (val r = rotate(s, ContinuitySig.RENEW, challenge) { csr, chain, sig, sum -> gateway.renew(oldClient, csr, chain, sig, sum) }) {
             is Rotation.Issued -> {
                 switchToPending()
                 // S2 §6.3 п. 7: confirm with the NEW key; an optimisation — the old cert expires from the gateway anyway.
@@ -148,7 +156,7 @@ internal class CertManager(
             is GatewayResult.Refused -> return onDenied(r.error, s)
             is GatewayResult.Failed -> return
         }
-        when (val r = rotate(s, ContinuitySig.REATTEST, challenge) { csr, chain, sig -> gateway.reattestFinish(active.serialHex, csr, chain, sig) }) {
+        when (val r = rotate(s, ContinuitySig.REATTEST, challenge) { csr, chain, sig, sum -> gateway.reattestFinish(active.serialHex, csr, chain, sig, sum) }) {
             is Rotation.Issued -> {
                 switchToPending()
                 dropKey(active) // the gateway retires the old certificate at once (S3 §5.6): no confirm
@@ -168,12 +176,15 @@ internal class CertManager(
      * New key bound to the nonce, CSR, continuitySig by the current key, send; on success the
      * new certificate is recorded as `pending` (S2 §6.3 п. 5). On a non-destructive error the
      * new key is deleted.
+     *
+     * The RASP summary and continuitySig v2 go only to a gateway whose challenge announced
+     * `raspSummary` (FR-035): an older gateway verifies v1 only and would revoke the device.
      */
     private suspend fun rotate(
         s: StoredState,
         prefix: String,
         challenge: Challenge,
-        send: (csr: ByteArray, chain: List<ByteArray>, sig: ByteArray) -> GatewayResult<IssuedCert>,
+        send: (csr: ByteArray, chain: List<ByteArray>, sig: ByteArray, raspSummary: ByteArray?) -> GatewayResult<IssuedCert>,
     ): Rotation {
         val active = s.active!!
         val deviceId = s.deviceId ?: return Rotation.Failed
@@ -183,11 +194,16 @@ internal class CertManager(
             is KeyGenResult.SoftwareKeystore -> return Rotation.Failed
         }
         val chainDer = key.chain.map { it.encoded }
+        // best effort: a summary that cannot be read must not stop the renewal — it goes as v1, without one
+        val sum: RaspSummary? = if (RaspSummaryStore.FEATURE in challenge.features) runCatching { summary.snapshot() }.getOrNull() else null
         val (csr, sig) = try {
             io {
                 val pub = keys.publicKey(newAlias)!!
                 val csr = Csr.build(pub, keys.privateKey(newAlias)!!)
-                val payload = ContinuitySig.payload(prefix, deviceId, BigInteger(active.serialHex, 16), challenge.nonce, pub.encoded, chainDer)
+                val serial = BigInteger(active.serialHex, 16)
+                val payload =
+                    if (sum == null) ContinuitySig.payload(prefix, deviceId, serial, challenge.nonce, pub.encoded, chainDer)
+                    else ContinuitySig.payloadV2(ContinuitySig.v2(prefix), deviceId, serial, challenge.nonce, pub.encoded, chainDer, sum.bytes)
                 val sig = Signature.getInstance("SHA256withECDSA").run { initSign(keys.privateKey(active.alias)!!); update(payload); sign() }
                 csr to sig
             }
@@ -196,12 +212,13 @@ internal class CertManager(
             return Rotation.Failed
         }
 
-        return when (val r = io { send(csr, chainDer, sig) }) {
+        return when (val r = io { send(csr, chainDer, sig, sum?.bytes) }) {
             is GatewayResult.Ok -> {
                 val issued = r.value
                 val cert = ActiveCert(newAlias, issued.certChain.first().serialNumber.toString(16), issued.notBefore, issued.notAfter, issued.renewAfter)
                 store.writeChain(KeystoreKeys.deviceKeyNumber(newAlias)!!, issued.certChain)
                 store.update { it.copy(pending = cert) }
+                sum?.let { runCatching { summary.sent(it) } }
                 Rotation.Issued(cert)
             }
             is GatewayResult.Refused -> {
@@ -289,9 +306,13 @@ internal class CertManager(
      * and the sender is kicked (п. 7).
      */
     suspend fun raspBlock(findings: List<RaspFinding>) {
-        if (store.load().phase != Phase.BLOCKED) alerts.enqueue(AlertKind.BLOCK, findings)
+        // the message is best effort: a full disk or a broken queue must never stop the wipe
+        if (store.load().phase != Phase.BLOCKED) {
+            runCatching { alerts.enqueue(AlertKind.BLOCK, findings) }
+                .onFailure { Journal.event("block_alert_failed", it.javaClass.simpleName) }
+        }
         block(BlockReason.RASP)
-        alerts.schedule()
+        runCatching { alerts.schedule() }
     }
 
     /** Records the intent first, then destroys everything; safe to repeat. No message (S2 §8, last paragraph). */
@@ -387,12 +408,26 @@ internal class CertManager(
 
         // 4. device key present but the Vault is gone → new Vault, the web app re-initialises E2EE
         if (s.phase == Phase.ENROLLED && s.active != null && vault.keys() != VaultKeys.PRESENT) {
-            vault.provision()
-            emit(TrustEvent.VaultReset)
+            // needs an unlocked device with a screen lock now: when that is not the case (a start
+            // from a push behind the lock screen) the next start tries again
+            if (runCatching { vault.provision() }.isSuccess) emit(TrustEvent.VaultReset)
         }
+        migrateVault()
 
         // 5. UpdateRequired is lifted once the app or the OS has been updated
         clearUpdateRequiredIfUpdated()
+    }
+
+    /** Story 2: an existing single-key vault moves its E2EE half under the unlocked-device key; safe to call often. */
+    suspend fun migrateVault() {
+        if (store.load().phase != Phase.ENROLLED) return
+        val moved = try {
+            vault.migrate()
+        } catch (e: Exception) {
+            Journal.event("vault_migrate_failed", e.javaClass.simpleName)
+            false
+        }
+        if (moved) emit(TrustEvent.BackgroundKeysReset)
     }
 
     private fun dropEnrolling() {

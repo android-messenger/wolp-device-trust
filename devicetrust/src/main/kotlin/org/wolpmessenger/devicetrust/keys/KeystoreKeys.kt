@@ -132,6 +132,9 @@ public class KeystoreKeys internal constructor(private val backend: KeyStoreBack
         public const val PRECHECK_ALIAS: String = "dt.precheck"
         public const val VAULT_ALIAS: String = "dt.vault"
 
+        /** KEK of the E2EE half of the Vault: usable only while the device is unlocked. */
+        public const val VAULT_UNLOCKED_ALIAS: String = "dt.vault.u"
+
         /** Keystore keys backed by the platform `AndroidKeyStore`. */
         public fun android(): KeystoreKeys = KeystoreKeys(AndroidKeyStoreBackend())
 

@@ -30,6 +30,11 @@ import org.wolpmessenger.devicetrust.clock.TrustClock
 import org.wolpmessenger.devicetrust.enroll.Enroller
 import org.wolpmessenger.devicetrust.keys.KeystoreKeys
 import org.wolpmessenger.devicetrust.net.GatewayClient
+import org.wolpmessenger.devicetrust.rasp.RaspSummarySource
+import org.wolpmessenger.devicetrust.rasp.RaspSummaryStore
+import org.wolpmessenger.devicetrust.api.RaspFinding
+import org.wolpmessenger.devicetrust.api.RaspReaction
+import java.security.MessageDigest
 import org.wolpmessenger.devicetrust.store.ActiveCert
 import org.wolpmessenger.devicetrust.store.Enrolling
 import org.wolpmessenger.devicetrust.store.Phase
@@ -73,12 +78,12 @@ class CertManagerTest {
         return OkHttpClient.Builder().addInterceptor { it.proceed(it.request().newBuilder().header("X-Test-Key", alias).build()) }.build()
     }
 
-    private fun manager(): CertManager {
+    private fun manager(summary: RaspSummarySource = RaspSummarySource.None): CertManager {
         val trustClock = TrustClock(clock)
         val gateway = GatewayClient(OkHttpClient(), server.url("/"), {}, appBase = server.url("/"))
         val precheck = Precheck(keys, FakeEnv(), MemCache(), RaspScanner { RaspReport.CLEAN }, config)
         val enroller = Enroller(config, precheck::run, keys, gateway, store, { vault.provision() }, { 10300 }, trustClock::now)
-        return CertManager(config, store, keys, trustClock, gateway, OkHttpClient(), ::mtlsFor, vault, enroller, { versions }, { events += it })
+        return CertManager(config, store, keys, trustClock, gateway, OkHttpClient(), ::mtlsFor, vault, enroller, { versions }, { events += it }, summary = summary)
     }
 
     private fun enrolledWithK1(): StoredState {
@@ -331,6 +336,141 @@ class CertManagerTest {
         assertEquals(Phase.RE_ENROLL_REQUIRED, store.load().phase)
     }
 
+    // ---------------------------------------------------------------- RASP summary (specs/001-rasp-hardening FR-035)
+
+    private val summaryStore by lazy { RaspSummaryStore(java.io.File(tmp.root, "rasp-summary.json")) { t0 } }
+    private fun challengeWith(features: String) =
+        MockResponse().setBody("""{"nonce":"${b64.encodeToString(nonce)}","expiresAt":"2026-11-10T10:05:00Z","features":$features}""")
+
+    private fun twoPasses() {
+        summaryStore.record(RaspReport(listOf(RaspFinding("DEV_OPTIONS", RaspReaction.REPORT, "on"))), nativeOk = true)
+        summaryStore.record(RaspReport.CLEAN, nativeOk = true)
+    }
+
+    /** Verifies continuitySig of [body] as v1 (no summary) or v2 (over the summary bytes in the body). */
+    private fun sigVerifies(body: JSONObject, prefix: String): Boolean {
+        val dec = Base64.getDecoder()
+        val chain = body.getJSONArray("attestationChain").let { a -> List(a.length()) { dec.decode(a.getString(it)) } }
+        val spki = backend.pairs.getValue("dt.device.k2").public.encoded
+        val serial = BigInteger(k1.serialHex, 16)
+        val payload =
+            if (body.has("raspSummary")) ContinuitySig.payloadV2(prefix, "01JDEVICE", serial, nonce, spki, chain, dec.decode(body.getString("raspSummary")))
+            else ContinuitySig.payload(prefix, "01JDEVICE", serial, nonce, spki, chain)
+        return Signature.getInstance("SHA256withECDSA").run {
+            initVerify(backend.pairs.getValue("dt.device.k1").public); update(payload); verify(dec.decode(body.getString("continuitySig")))
+        }
+    }
+
+    @Test
+    fun `new client, old gateway - no features announced means v1 and no summary, the counters stay`() = runTest {
+        enrolledWithK1()
+        twoPasses()
+        clock.set(k1.renewAfter.plusSeconds(1))
+        server.enqueue(challenge())
+        server.enqueue(issued(Instant.ofEpochMilli(clock.nowMs)))
+        server.enqueue(MockResponse().setResponseCode(204))
+        assertTrue(manager(summaryStore).ensureFresh() is TrustState.Active)
+
+        take()
+        val body = JSONObject(take().body.readUtf8())
+        assertTrue("an older gateway revokes on a signature it cannot verify", !body.has("raspSummary"))
+        assertTrue(sigVerifies(body, ContinuitySig.RENEW))
+        assertEquals(2, summaryStore.snapshot().passes)
+    }
+
+    @Test
+    fun `features that are not a list of strings announce nothing`() = runTest {
+        for (features in listOf("\"raspSummary\"", "{\"raspSummary\":true}", "[1,null,[\"raspSummary\"]]", "[\"other\"]", "null")) {
+            backend.keys.clear()
+            enrolledWithK1()
+            clock.set(k1.renewAfter.plusSeconds(1))
+            server.enqueue(challengeWith(features))
+            server.enqueue(issued(Instant.ofEpochMilli(clock.nowMs)))
+            server.enqueue(MockResponse().setResponseCode(204))
+            assertTrue(features, manager(summaryStore).ensureFresh() is TrustState.Active)
+            take()
+            val body = JSONObject(take().body.readUtf8())
+            take()
+            assertTrue(features, !body.has("raspSummary"))
+            assertTrue(features, sigVerifies(body, ContinuitySig.RENEW))
+        }
+    }
+
+    @Test
+    fun `gateway announces raspSummary - renewal carries the summary under continuitySig v2 and the counters restart`() = runTest {
+        enrolledWithK1()
+        twoPasses()
+        clock.set(k1.renewAfter.plusSeconds(1))
+        server.enqueue(challengeWith("[\"somethingElse\",\"raspSummary\"]"))
+        server.enqueue(issued(Instant.ofEpochMilli(clock.nowMs)))
+        server.enqueue(MockResponse().setResponseCode(204))
+        assertTrue(manager(summaryStore).ensureFresh() is TrustState.Active)
+
+        take()
+        val body = JSONObject(take().body.readUtf8())
+        assertEquals(
+            """{"v":1,"native":true,"passes":2,"nativeFail":0,"since":"2026-11-08T10:00:00Z","findings":["DEV_OPTIONS"]}""",
+            String(Base64.getDecoder().decode(body.getString("raspSummary"))),
+        )
+        assertTrue(sigVerifies(body, ContinuitySig.RENEW_V2))
+        assertTrue("v2 is not v1 with an extra field", !sigVerifies(JSONObject(body.toString()).apply { remove("raspSummary") }, ContinuitySig.RENEW))
+        val after = summaryStore.snapshot()
+        assertEquals(0, after.passes)
+        assertTrue(String(after.bytes).endsWith("\"findings\":[]}"))
+    }
+
+    @Test
+    fun `gateway announces raspSummary - recovery uses the reattest v2 prefix`() = runTest {
+        enrolledWithK1()
+        twoPasses()
+        clock.set(k1.notAfter.plusSeconds(3600))
+        server.enqueue(challengeWith("[\"raspSummary\"]"))
+        server.enqueue(issued(Instant.ofEpochMilli(clock.nowMs)))
+        assertTrue(manager(summaryStore).ensureFresh() is TrustState.Active)
+
+        take()
+        val body = JSONObject(take().body.readUtf8())
+        assertTrue(body.has("raspSummary"))
+        assertTrue(sigVerifies(body, ContinuitySig.REATTEST_V2))
+        assertTrue(!sigVerifies(body, ContinuitySig.RENEW_V2))
+        assertEquals(0, summaryStore.snapshot().passes)
+    }
+
+    @Test
+    fun `a refused or lost renewal keeps the counters for the next one`() = runTest {
+        enrolledWithK1()
+        twoPasses()
+        clock.set(k1.renewAfter.plusSeconds(1))
+        server.enqueue(challengeWith("[\"raspSummary\"]"))
+        server.enqueue(refused(429, """{"error":"RATE_LIMITED"}"""))
+        manager(summaryStore).ensureFresh()
+        assertEquals(2, summaryStore.snapshot().passes)
+
+        server.enqueue(challengeWith("[\"raspSummary\"]"))
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        manager(summaryStore).ensureFresh()
+        assertEquals(2, summaryStore.snapshot().passes)
+    }
+
+    @Test
+    fun `a summary that cannot be read does not stop the renewal - it goes as v1`() = runTest {
+        enrolledWithK1()
+        clock.set(k1.renewAfter.plusSeconds(1))
+        server.enqueue(challengeWith("[\"raspSummary\"]"))
+        server.enqueue(issued(Instant.ofEpochMilli(clock.nowMs)))
+        server.enqueue(MockResponse().setResponseCode(204))
+        val broken = object : RaspSummarySource {
+            override fun snapshot() = throw java.io.IOException("disk")
+            override fun sent(summary: org.wolpmessenger.devicetrust.rasp.RaspSummary) = Unit
+            override fun reset() = Unit
+        }
+        assertTrue(manager(broken).ensureFresh() is TrustState.Active)
+        take()
+        val body = JSONObject(take().body.readUtf8())
+        assertTrue(!body.has("raspSummary"))
+        assertTrue(sigVerifies(body, ContinuitySig.RENEW))
+    }
+
     private fun FakeBackend.deviceAliases() = aliases().filter { it.startsWith(KeystoreKeys.DEVICE_PREFIX) }
 }
 
@@ -350,6 +490,26 @@ class ContinuitySigTest {
             val oldKey = java.security.KeyFactory.getInstance("EC").generatePublic(java.security.spec.X509EncodedKeySpec(dec.decode(v.getString("oldKeySpkiB64"))))
             assertTrue(Signature.getInstance("SHA256withECDSA").run { initVerify(oldKey); update(payload); verify(dec.decode(v.getString("continuitySigB64"))) })
         }
+    }
+
+    @Test
+    fun `v2 payload and signature match the independent vectors (Python cryptography)`() {
+        val file = generateSequence(java.io.File("").absoluteFile) { it.parentFile }
+            .map { java.io.File(it, "testvectors/continuity/continuity-v2.json") }.first { it.exists() }
+        val vectors = JSONObject(file.readText()).getJSONArray("vectors")
+        val dec = Base64.getDecoder()
+        assertEquals(2, vectors.length())
+        for (i in 0 until vectors.length()) {
+            val v = vectors.getJSONObject(i)
+            val chain = v.getJSONArray("attestationChainB64").let { a -> List(a.length()) { dec.decode(a.getString(it)) } }
+            val payload = ContinuitySig.payloadV2(v.getString("prefix"), v.getString("deviceId"), BigInteger(v.getString("certSerialHex"), 16),
+                dec.decode(v.getString("nonceB64")), dec.decode(v.getString("newKeySpkiB64")), chain, dec.decode(v.getString("raspSummaryB64")))
+            assertEquals(v.getString("prefix"), v.getString("payloadHex"), payload.joinToString("") { "%02x".format(it) })
+            val oldKey = java.security.KeyFactory.getInstance("EC").generatePublic(java.security.spec.X509EncodedKeySpec(dec.decode(v.getString("oldKeySpkiB64"))))
+            assertTrue(Signature.getInstance("SHA256withECDSA").run { initVerify(oldKey); update(payload); verify(dec.decode(v.getString("continuitySigB64"))) })
+        }
+        assertEquals(ContinuitySig.RENEW_V2, ContinuitySig.v2(ContinuitySig.RENEW))
+        assertEquals(ContinuitySig.REATTEST_V2, ContinuitySig.v2(ContinuitySig.REATTEST))
     }
 
     @Test

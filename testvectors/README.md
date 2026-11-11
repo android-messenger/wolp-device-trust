@@ -54,3 +54,10 @@ Kotlin signer and the Go verifier agree byte for byte. Per vector: inputs (`pref
 serial is encoded big-endian **without** a sign byte, `nonceB64`, `newKeySpkiB64`,
 `attestationChainB64`), the exact signed `payloadHex`, the old key `oldKeySpkiB64` and a valid
 `continuitySigB64` (DER ECDSA P-256/SHA-256).
+
+## `continuity/continuity-v2.json` — `continuitySig` v2 with the RASP summary (specs/001-rasp-hardening FR-035)
+
+Same inputs as v1 plus `raspSummaryB64` — the exact bytes sent in `raspSummary`. The signed
+`payloadHex` is the v1 layout with the prefix `wolp-renew-v2` / `wolp-reattest-v2`, then
+`SHA-256(summary bytes)`. Generated independently (Python `cryptography`) with its own old key;
+checked by the library's JVM tests. The gateway's verifier must pass the same file.

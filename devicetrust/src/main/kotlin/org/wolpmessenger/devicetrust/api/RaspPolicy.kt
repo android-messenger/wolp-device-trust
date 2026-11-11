@@ -6,6 +6,9 @@ public object RaspCheck {
     public const val ROOT_MAGISK: String = "ROOT_MAGISK"
     public const val ROOT_MANAGER_PKG: String = "ROOT_MANAGER_PKG"
     public const val ROOT_PROPS: String = "ROOT_PROPS"
+
+    /** `test-keys` in the build tags: some factory firmware that passes attestation carries it, so never more than a report by default. */
+    public const val ROOT_TEST_KEYS: String = "ROOT_TEST_KEYS"
     public const val HOOK_FRIDA_MAPS: String = "HOOK_FRIDA_MAPS"
     public const val HOOK_FRIDA_PORT: String = "HOOK_FRIDA_PORT"
     public const val HOOK_XPOSED: String = "HOOK_XPOSED"
@@ -25,6 +28,7 @@ public object RaspCheck {
         ROOT_MAGISK to RaspReaction.BLOCK,
         ROOT_MANAGER_PKG to RaspReaction.REPORT,
         ROOT_PROPS to RaspReaction.BLOCK,
+        ROOT_TEST_KEYS to RaspReaction.REPORT,
         HOOK_FRIDA_MAPS to RaspReaction.BLOCK,
         HOOK_FRIDA_PORT to RaspReaction.BLOCK,
         HOOK_XPOSED to RaspReaction.BLOCK,
