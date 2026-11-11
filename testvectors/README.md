@@ -61,3 +61,11 @@ Same inputs as v1 plus `raspSummaryB64` — the exact bytes sent in `raspSummary
 `payloadHex` is the v1 layout with the prefix `wolp-renew-v2` / `wolp-reattest-v2`, then
 `SHA-256(summary bytes)`. Generated independently (Python `cryptography`) with its own old key;
 checked by the library's JVM tests. The gateway's verifier must pass the same file.
+
+## Updating the vectors
+
+- Device vectors: run `tools/export-testvectors.sh [-s <serial>]` with the device connected, then add a
+  row to "Exported so far". Step by step: [`docs/DEVELOPMENT.md`](../docs/DEVELOPMENT.md), section 7.3.
+- `continuity/*.json`: the generator script is not kept in this repository. The files are a contract
+  shared with the gateway tests — change them only together with the signature format
+  (`cert/ContinuitySig.kt`, S3 §5.4, §5.4a) and with the gateway's copy.
