@@ -1,80 +1,87 @@
 # wolp-device-trust
 
-Android-библиотека доверия устройства (**S2**) для приложения Wolp Messenger (`org.wolpmessenger`): ключи в Android Keystore, аттестация ключей, клиентские сертификаты для mTLS и их продление, RASP, Vault для ключей E2EE. Спецификация — `android-messenger/docs` → `specs/S2-device-trust-lib.md` (контракты шлюза — `specs/S3-gateway.md`). Концепция безопасности — `docs/security/` (`02-keys-attestation.md`, `05-device-lifecycle.md`, `07-rasp.md`, `08-e2ee-vault-bridge.md`).
+Android-библиотека доверия устройства для мессенджера Wolp (`org.wolpmessenger`). Она создаёт ключ устройства в Android Keystore, подтверждает его аппаратной аттестацией, получает у шлюза клиентский сертификат для mTLS и сама его продлевает, проверяет среду выполнения (RASP: root, перехватчики, отладчик) и хранит секреты сквозного шифрования в Vault — хранилище с конвертным шифрованием, ключи которого лежат в Keystore.
 
-**Руководство по API для приложения (S1): [`docs/API.md`](docs/API.md).** Публичный API — объект `org.wolpmessenger.devicetrust.DeviceTrust` и пакет `…devicetrust.api`; остальное `internal` или закрыто opt-in `@InternalDeviceTrustApi`. Все `suspend`-функции фасада main-safe (`Dispatchers.IO`). `events` буферизуются до подписки и доставляются один раз (один подписчик на процесс).
+Библиотека написана на Kotlin, небольшая часть проверок — на C (`libwolpdt.so`). Она рассчитана на разработчика Android-приложения, которое работает со шлюзом Wolp: приложение вызывает один объект `DeviceTrust` и не занимается ключами, сертификатами и проверками само.
+
+В документации используются три обозначения из общей спецификации проекта:
+
+| Обозначение | Что это |
+|---|---|
+| S1 | приложение (`wolp-android`), которое подключает библиотеку |
+| S2 | эта библиотека |
+| S3 | шлюз: сервер, который проверяет аттестацию, выдаёт сертификаты устройствам и пропускает к мессенджеру только запросы с действующим сертификатом |
+
+## Что библиотека гарантирует и чего не гарантирует
+
+Гарантирует:
+
+- Закрытый ключ устройства создаётся в аппаратном хранилище (TEE или StrongBox) и не покидает его. Если Keystore программный, устройство не регистрируется.
+- Запросы через `DeviceTrust.okHttpClient()` идут с клиентским сертификатом устройства и только к серверу с закреплённым (pinned) ключом.
+- Ключи удаляются только по ответу шлюза, полученному по закреплённому каналу, либо по решению RASP. Код отказа, увиденный в WebView, сам ничего не удаляет.
+- Уничтожение ключей доводится до конца после сбоя: намерение записывается на диск раньше удаления, при следующем запуске удаление повторяется.
+- Секреты сквозного шифрования (назначения `E2EE`, `E2EE_PLAINTEXT`) расшифровываются только при разблокированном экране и только после прохода RASP без блокирующих находок.
+
+Не гарантирует:
+
+- **RASP — дополнительный слой, а не основной.** На устройстве с root его можно обойти полностью, включая отправку оповещений. Сильный сигнал о состоянии устройства — серверная проверка аттестации на шлюзе и ежедневное продление сертификата.
+- Сводка RASP, которую библиотека отправляет при продлении, подписана ключом устройства, а не доверенной средой: приложение под полным контролем атакующего пришлёт «чисто».
+- Реакция BLOCK стирает всё, включая Vault. При ложном срабатывании история секретных чатов теряется так же безвозвратно, как при настоящей компрометации.
+- Библиотека не содержит интерфейса, не работает с push-уведомлениями, не скачивает и не устанавливает обновления и не хранит данные веб-клиента.
+
+## Компоненты
 
 ```mermaid
 flowchart LR
-  App["Приложение S1<br/>(wolp-android)"] --> DT["DeviceTrust<br/>(фасад)"]
-  DT --> K["keys + attest<br/>Keystore, аттестация"]
-  DT --> E["enroll<br/>регистрация"]
-  DT --> C["cert<br/>продление, восстановление"]
-  DT --> T["tls<br/>mTLS OkHttp, пиннинг"]
-  DT --> R["rasp + native<br/>libwolpdt.so"]
-  DT --> A["alert<br/>BLOCK / REPORT / UNENROLL"]
-  DT --> V["vault<br/>ключи E2EE"]
-  E & C & A --> T
-  T --> GW["шлюз S3<br/>enroll / renew / ping / alert"]
+  App["Приложение (S1)"] --> DT["DeviceTrust<br/>фасад"]
+  DT --> Core["DeviceTrustCore<br/>координатор"]
+  Core --> Enroll["enroll<br/>регистрация"]
+  Core --> Cert["cert<br/>продление, восстановление,<br/>блокировка, отвязка"]
+  Core --> Rasp["rasp + libwolpdt.so<br/>проверки среды"]
+  Core --> Alert["alert<br/>оповещения шлюзу"]
+  DT --> Vault["vault<br/>секреты E2EE"]
+  DT --> Tls["tls<br/>mTLS, закрепление ключей"]
+  Enroll & Cert --> Keys["keys + attest<br/>Android Keystore"]
+  Vault --> Keys
+  Enroll & Cert & Alert --> Net["net<br/>клиент шлюза"]
+  Net & Tls --> GW["Шлюз (S3)"]
+  Rasp -. "закрывает Vault при находках" .-> Vault
 ```
 
-## Модули
+Подробно о каждом компоненте — в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-| Модуль | Что |
-|---|---|
-| `devicetrust/` | библиотека (AAR), `minSdk` 33; пакеты ниже |
-| `devicetrust-native/` | `libwolpdt.so` (C): native-проверки RASP, `APK_SIGNATURE`, зашифрованные строки (`strings.txt`), host-тесты (`test/`) |
-| `sample/` | демо-приложение: факты устройства, предпроверка, аттестация, замеры, отчёт; активности стенда `StandEnrollActivity`, `StandRenewActivity` |
-| `pilot/` | **эталон сборки** приложения: flavors product/pilot, R8, release-подпись, `verify<Variant>BuildKind` |
-| `docs/API.md` | руководство по интеграции |
-| `bench/`, `testvectors/`, `testvectors-export/`, `tools/` | замеры на устройствах, тестовые векторы для S3, скрипты `bench.sh`, `export-testvectors.sh` |
+## Быстрый старт за 10 минут
 
-Пакеты `devicetrust/src/main/kotlin/org/wolpmessenger/devicetrust/`:
+Нужны JDK 17 или 21, Android SDK (платформа 36, build-tools), NDK `28.2.13676358` и CMake `3.22.1` — полный список в разделе [«Требования к сборке»](#требования-к-сборке).
 
-| Пакет | Что |
-|---|---|
-| `keys/`, `attest/` | ключи EC P-256 с challenge аттестации, StrongBox → TEE, отказ `SOFTWARE`; цепочка аттестации; предпроверка (S2 §6.1) |
-| `asn1/` | DER-кодировщик и PKCS#10 CSR |
-| `clock/` | `TrustClock`: время сервера из закреплённого канала + `elapsedRealtime` |
-| `net/`, `api/` | клиент шлюза, `GatewayCode` (S3 §5.9), публичные типы |
-| `enroll/` | регистрация (S2 §6.2); пароль онбординга не становится `String` |
-| `cert/` | продление (§6.3), восстановление `reattest` (§6.4), сверка при старте (§6.6), `unenroll`, `RenewWorker` |
-| `tls/` | `okHttpClient()` с mTLS и пиннингом, сброс пула и SSLContext при смене `credentialsVersion`, R7; `updateHttpClient()` — только системные CA |
-| `rasp/` | проверки Kotlin, политика §7.3 по типу сборки, dry run |
-| `alert/` | подписанные BLOCK / REPORT / UNENROLL, очередь, `AlertWorker` |
-| `vault/` | KEK `dt.vault` в Keystore оборачивает DEK; `wrap`/`unwrap` — AES-256-GCM с назначением |
-| `store/` | `state.json` + `certs/<N>.pem`, атомарная запись |
+1. Укажите окружение (пути — пример, подставьте свои):
 
-## Сделано — этапы 1–7 (S2 §14, PR #1–#17 слиты)
+   ```bash
+   export JAVA_HOME=/opt/jdk-21.0.2 ANDROID_HOME=$HOME/Android/Sdk
+   ```
 
-| Этап | Что |
-|---|---|
-| 1 | ключи Keystore, аттестация, предпроверка, экспорт тестовых векторов, замеры TEE/StrongBox |
-| 2 | Vault (конвертная схема) и замеры |
-| 3 | DER/CSR, клиент шлюза, регистрация, хранилище, `TrustClock` |
-| 4 | продление, восстановление, сверка §6.6, `RenewWorker` |
-| 5 | mTLS-клиент: `credentialsVersion`, сброс пула и TLS-сессий, R7 |
-| 6 | RASP Kotlin + native, политика §7.3, alerts (BLOCK/REPORT), `onGatewayDenied` (§5.3), `unenroll`, `checkSessionBinding`, инструментальный тест mTLS ключом Keystore |
-| 7 | шифрование строк `libwolpdt.so`, native `APK_SIGNATURE` (APK Signing Block v2/v3/v3.1), `pilot/` — эталон сборки, `docs/API.md` |
+2. Запустите тесты, которым не нужно устройство (160 тестов на JVM):
 
-Ключевые свойства:
-- BLOCK при RASP — строго: сообщение, подписанное текущим ключом, **до** стирания → намерение → стирание → событие; сбой между шагами доводится при следующем старте.
-- Отказ шлюза, пришедший из WebView, сам ничего не стирает: только `GET /v1/device/ping` по закреплённому каналу (не чаще раза в 30 с), действие — по его коду. Неудачный ping ничего не удаляет.
-- Native-проверки сравниваются с Kotlin-проверками; расхождение → `HOOK_TAMPER`. Результат native подписан HMAC-SHA256 ключом процесса.
-- `checkNativeStrings` валит сборку, если строка проверки читается в упакованной `.so`.
+   ```bash
+   ./gradlew :devicetrust:testDebugUnitTest
+   ```
 
-На **Galaxy A37** (SM-A376B, Android 16, TEE, без StrongBox): регистрация и продление против стенда, mTLS ключом Keystore (TLS 1.3 и 1.2), RASP Kotlin = native без ложных BLOCK, native `APK_SIGNATURE` = Kotlin; замеры Vault в целях S2 — [`bench/README.md`](bench/README.md). На эмуляторе Keystore программный → `Unsupported(SOFTWARE_KEYSTORE)` (S2 §15 п. 2).
+3. Соберите и установите демонстрационное приложение `sample`:
 
-## Остаток
+   ```bash
+   ./gradlew :sample:assembleDebug
+   adb install -r sample/build/outputs/apk/debug/sample-debug.apk
+   ```
 
-| Что | Почему не сделано |
-|---|---|
-| матрица устройств S2 §13: Pixel 8+ (StrongBox, RKP), Samsung с Knox Vault, устройство с заводской цепочкой | нужны устройства; замеры StrongBox нужны для решения `deviceKeyStrongBox` (R4) |
-| RASP на root-устройстве: Magisk, `frida-server` | нужно устройство с root |
+4. Откройте на телефоне приложение «Wolp Device Trust». Шлюз ему не нужен. Оно показывает сведения об устройстве, результат предпроверки, цепочку аттестации ключа (TEE и, если есть, StrongBox), замеры скорости Keystore и Vault. Кнопка **Share report** отдаёт один JSON со всеми результатами через системное меню «Поделиться».
 
-## Подключение
+На эмуляторе Keystore программный, поэтому предпроверка там возвращает `Unsupported(SOFTWARE_KEYSTORE)` — это ожидаемое поведение, а не ошибка.
 
-Как в [`wolp-android`](https://github.com/android-messenger/wolp-android): git-подмодуль `app/android/third_party/wolp-device-trust` (закреплённый коммит `main`) и `includeBuild` с подстановкой модуля:
+Остальные виды тестов, сборка `pilot` и работа с устройством описаны в [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+
+## Как приложение подключает библиотеку
+
+Приложение `wolp-android` подключает репозиторий git-подмодулем и подставляет модуль через составную сборку Gradle:
 
 ```kotlin
 // settings.gradle.kts приложения
@@ -85,42 +92,76 @@ includeBuild("third_party/wolp-device-trust") {
 }
 ```
 
-Обязательно: `ndkVersion` в модуле приложения (иначе `libwolpdt.so` попадёт в APK с символами), R8, одна release-подпись для product и pilot. Полный список — [`docs/API.md` §1](docs/API.md#1-подключение), образец сборки — [`pilot/build.gradle.kts`](pilot/build.gradle.kts). Репозиторий приватный: CI `wolp-android` забирает его deploy-ключом только на чтение.
-
-## Sample app
-
-`sample/` — приложение на Compose, шлюз не нужен: факты устройства, предпроверка, аттестация ключа (TEE и StrongBox, цепочка), замеры Keystore/Vault против целей S2 и **Share report** — один JSON со всеми результатами и свежими тестовыми векторами через системное меню «Поделиться».
-
-```bash
-./gradlew :sample:assembleDebug
-adb install -r sample/build/outputs/apk/debug/sample-debug.apk
+```kotlin
+// build.gradle.kts модуля приложения
+dependencies { implementation("org.wolpmessenger:devicetrust") }
 ```
 
-CI публикует APK артефактом `sample-debug-apk` каждого запуска. Стенд регистрации (`wolp-android/p1/stand/devices`, `enroll.sh`, `renew.sh`) запускает `StandEnrollActivity` / `StandRenewActivity` из debug-сборки `sample`.
+Дальше приложение один раз вызывает `DeviceTrust.init(...)` в `Application.onCreate`, подписывается на `DeviceTrust.events`, показывает экраны по `DeviceTrust.state` и отправляет запросы через `DeviceTrust.okHttpClient()`:
 
-## Эталон сборки (`pilot/`, S2 §7.3)
-
-Flavors `product` (`buildKind` RELEASE, `versionCode` `MMmmpp`, `pp` 00–89) и `pilot` (PILOT, `pp` 90–99, `raspDryRun`), **один applicationId** (пилот обновляется до релиза на месте), R8, одна release-подпись, `ndkVersion`. `verify<Variant>BuildKind` перед каждой release-сборкой отказывает при неверном типе, диапазоне `versionCode`, dry run в product, debuggable release, отсутствии подписи или подписи не из `expectedSigningDigests`. Приложение показывает факты сборки, состояние и `checkIntegrity()` (тег `DT-PILOT`).
-
-```bash
-./gradlew $SIGN -Pwolp.expectedSigningDigests=<hex> :pilot:assembleProductRelease :pilot:assemblePilotRelease
-./gradlew $SIGN -Pwolp.pilot.wrongDigest=true …   # демонстрация: APK_SIGNATURE BLOCK / dry-run REPORT
+```kotlin
+DeviceTrust.init(this, DeviceTrustConfig(
+    enrollBaseUrl = "https://enroll.<host>",
+    appBaseUrl = "https://app.<host>",
+    serverPins = listOf("sha256/<основной>", "sha256/<запасной>"),
+    expectedSigningDigests = listOf("<SHA-256 сертификата подписи, hex>"),
+))
 ```
 
-`$SIGN` — свойства `wolp.signing.storeFile`, `storePassword`, `keyAlias`, `keyPassword`.
+Обязательные условия сборки приложения (`ndkVersion`, R8, одна подпись для продуктовой и пилотной сборок), все поля конфигурации, состояния, события и вызовы — в [`docs/API.md`](docs/API.md). Образец сборки приложения — модуль [`pilot/`](pilot/build.gradle.kts).
 
-## Сборка и проверки
+## Карта документации
 
-Gradle 8.14 требует JDK 17–21.
+| Документ | На какой вопрос отвечает |
+|---|---|
+| [`docs/API.md`](docs/API.md) | Как подключить библиотеку к приложению: что вызывать, когда и что делать с результатом; что менять при переходе с прошлой версии |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Как библиотека устроена: компоненты, ключи Keystore, файлы на диске, автомат состояний, сценарии регистрации, продления, восстановления, блокировки и отвязки, поведение при сбоях |
+| [`docs/RASP.md`](docs/RASP.md) | Что именно проверяет RASP: каждая проверка, реакции, зависимость от типа сборки, оповещения шлюзу, сводка при продлении |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Как собирать и тестировать саму библиотеку, как добавить проверку RASP, как обновить тестовые векторы и замеры |
+| [`testvectors/README.md`](testvectors/README.md) | Формат тестовых векторов для проверок на шлюзе (на английском) |
+| [`bench/README.md`](bench/README.md) | Замеры скорости Keystore и Vault на устройствах (на английском) |
+| [`specs/001-rasp-hardening/spec.md`](specs/001-rasp-hardening/spec.md) | Зачем и как усиливались RASP и Vault: угрозы, требования, решения |
 
-```bash
-./gradlew :devicetrust:testDebugUnitTest          # JVM-тесты
-./gradlew :devicetrust:connectedDebugAndroidTest  # на устройстве: настоящий Keystore
-./gradlew checkForbiddenDependencies              # нет Firebase / Play Services (S2 §15 п. 1)
-./gradlew :devicetrust:checkNativeStrings         # нет открытых строк проверок в libwolpdt.so
-devicetrust-native/test/run.sh <apk>              # host-тесты native (ASan/UBSan; нужны cc, keytool, apksigner)
-tools/bench.sh [-s serial]                        # → bench/<model>.json (Keystore + Vault)
-tools/export-testvectors.sh [-s serial]           # → testvectors/<model>/*.json
-```
+Нормативные документы лежат в отдельном репозитории `android-messenger/docs`: `specs/S2-device-trust-lib.md` (эта библиотека), `specs/S3-gateway.md` (шлюз и его коды ошибок), `security/` (концепция безопасности). Ссылки вида «S2 §6.3» в документации и в коде указывают на разделы этих спецификаций. Если документ и код расходятся, верен код.
 
-CI (`.github/workflows/ci.yml`): JVM-тесты, `checkForbiddenDependencies`, сборка AAR/sample/тестовых APK, `checkNativeStrings`, host-тесты native, pilot-сборки одноразовым ключом, APK `sample` артефактом.
+## Структура репозитория
+
+| Путь | Содержимое |
+|---|---|
+| `devicetrust/` | библиотека (AAR); исходный код в `src/main/kotlin/org/wolpmessenger/devicetrust/`, тесты на JVM в `src/test`, тесты на устройстве в `src/androidTest`, общие для обоих в `src/sharedTest` |
+| `devicetrust-native/` | `libwolpdt.so` на C: проверки RASP, чтение блока подписи APK, таблица зашифрованных строк `strings.txt`, тесты для сборочной машины в `test/` |
+| `sample/` | демонстрационное и диагностическое приложение; в debug-сборке — экраны `StandEnrollActivity` и `StandRenewActivity` для регистрации и продления на стенде шлюза |
+| `pilot/` | образец сборки приложения: продуктовая и пилотная сборки, R8, release-подпись, проверка `verify<Variant>BuildKind` |
+| `docs/` | документация |
+| `specs/` | спецификации изменений и результаты запусков на устройствах |
+| `testvectors/` | цепочки аттестации с реальных устройств и векторы подписи `continuitySig` для тестов шлюза |
+| `bench/` | результаты замеров |
+| `tools/` | `bench.sh`, `export-testvectors.sh` и общий для них `adb-env.sh` |
+| `.github/workflows/ci.yml` | непрерывная интеграция |
+
+## Состояние и известные пробелы
+
+Реализовано всё, что описано в [`docs/API.md`](docs/API.md). На Galaxy A37 (SM-A376B, Android 16, TEE без StrongBox) проверены: регистрация и продление на стенде шлюза, mTLS ключом Keystore по TLS 1.3 и 1.2, совпадение результатов Kotlin- и native-проверок RASP без ложных блокировок, привязка ключа Vault к блокировке экрана. Замеры — в [`bench/README.md`](bench/README.md), протоколы запусков — в [`specs/001-rasp-hardening/device-matrix.md`](specs/001-rasp-hardening/device-matrix.md).
+
+Известные пробелы:
+
+| Пробел | Следствие |
+|---|---|
+| RASP не проверен на устройстве с root (Magisk, KernelSU) и с `frida-server` | неизвестно, какие проверки срабатывают на реальном взломанном телефоне |
+| Нет запусков на устройствах со StrongBox (Pixel 8 и новее, Samsung с Knox Vault) и на устройстве с заводской цепочкой аттестации | параметр `deviceKeyStrongBox` выключен по умолчанию; тестовых векторов для этих устройств нет |
+| Снятие блокировки экрана на зарегистрированном устройстве проверено только тестами на JVM | поведение Keystore в этом случае на реальном устройстве не подтверждено |
+| `HOOK_TAMPER` (расхождение Kotlin- и native-проверок) по умолчанию только сообщает шлюзу | решение о блокировке будет принято по данным пилота |
+| Сводка RASP отправляется только шлюзу, который объявил её поддержку | до включения флага `DEVICES_RASP_SUMMARY` на шлюзе запросы продления прежние |
+| Устройство, которое не выходило на связь дольше срока восстановления, не может зарегистрироваться заново вызовом `enroll()` | см. [`docs/API.md`, раздел 12](docs/API.md#12-диагностика-неполадок) |
+
+## Требования к сборке
+
+| Что | Версия |
+|---|---|
+| JDK | 17 или 21 (Gradle 8.14.3 из обёртки не работает на более новых) |
+| Gradle | 8.14.3, запускается через `./gradlew` |
+| Android Gradle Plugin / Kotlin | 8.13.0 / 2.2.21 |
+| Android SDK | `compileSdk` 36; `minSdk` 33 |
+| NDK и CMake | `28.2.13676358` и `3.22.1` — для сборки `libwolpdt.so` |
+| Для тестов native-части на сборочной машине | компилятор `cc`, `keytool` из JDK, `apksigner` из Android build-tools |
+| Для тестов на устройстве, замеров и экспорта векторов | `adb` и подключённое устройство с Android 13 или новее |
