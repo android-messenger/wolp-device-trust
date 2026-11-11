@@ -44,6 +44,8 @@ internal class Enroller(
     private val provisionVault: suspend () -> Unit,
     private val versionCode: () -> Long,
     private val now: () -> Instant,
+    /** A certificate was issued by enroll or its replay (the RASP summary starts counting over). */
+    private val onEnrolled: () -> Unit = {},
 ) {
     private val mutex = Mutex()
 
@@ -185,6 +187,7 @@ internal class Enroller(
                 }
                 store.deleteChainsExcept(setOf(n))
                 keys.deleteOrphans(keep = setOf(e.alias))
+                runCatching(onEnrolled)
                 done(EnrollResult.Ok(f.deviceId ?: ""))
             }
         }

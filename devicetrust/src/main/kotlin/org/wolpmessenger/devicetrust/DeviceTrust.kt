@@ -50,6 +50,7 @@ import org.wolpmessenger.devicetrust.rasp.IntegrityGate
 import org.wolpmessenger.devicetrust.rasp.KotlinChecks
 import org.wolpmessenger.devicetrust.rasp.NativeChecks
 import org.wolpmessenger.devicetrust.rasp.RaspEngine
+import org.wolpmessenger.devicetrust.rasp.RaspSummaryStore
 import org.wolpmessenger.devicetrust.cert.CertManager
 import org.wolpmessenger.devicetrust.cert.RenewWorker
 import org.wolpmessenger.devicetrust.cert.VaultOps
@@ -115,6 +116,7 @@ public object DeviceTrust {
             NativeChecks(digests)::scan,
             EffectivePolicy(config, debuggable, versionCodeEarly),
         )
+        val summary = RaspSummaryStore(File(dir, "rasp-summary.json"), clock::now)
         lateinit var alertsRef: Alerts
         // every RASP pass queues its REPORT findings (rate-limited, S2 §7.4)
         // …and decides whether the Vault may hand out secrets: every pass goes through here (start-up,
@@ -129,6 +131,8 @@ public object DeviceTrust {
                 throw e
             }
             gate.record(engine.allowsSecrets(r))
+            // counted for the summary sent with the next renewal (FR-035); a full disk must not fail the pass
+            runCatching { summary.record(r, engine.nativeRan) }.onFailure { Journal.event("rasp_summary_failed", it.javaClass.simpleName) }
             if (r.reports.isNotEmpty()) alertsRef.report(r.reports)
             r
         }
@@ -146,7 +150,7 @@ public object DeviceTrust {
         val precheckReacting: suspend () -> PrecheckResult = {
             precheck.run().also { if (it is PrecheckResult.Compromised) certs.raspBlock(it.report.blocking) }
         }
-        val enroller = Enroller(config, precheckReacting, keys, gateway, store, { vault.provision() }, { versionCode }, clock::now)
+        val enroller = Enroller(config, precheckReacting, keys, gateway, store, { vault.provision() }, { versionCode }, clock::now, onEnrolled = summary::reset)
         certs = CertManager(
             config, store, keys, clock, gateway, pinned,
             mtlsFor = { creds -> HttpClients.mtls(pinned, creds) },
@@ -161,6 +165,7 @@ public object DeviceTrust {
             emit = { eventQueue.trySend(it) },
             integrity = scanner::scan,
             alerts = alerts,
+            summary = summary,
         )
         val sender = AlertSender(queue, alerts, gateway, config.cookieProvider, clock::now)
         val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink, sender, appClient = { http.client }, gateway = gateway, rasp = scanner::scan)

@@ -28,7 +28,13 @@ internal sealed interface GatewayResult<out T> {
 }
 
 /** `200` of `enroll/start`, `renew/challenge`, `reattest/challenge`. */
-internal class Challenge(val nonce: ByteArray, val expiresAt: Instant, val enrollmentId: String? = null)
+internal class Challenge(
+    val nonce: ByteArray,
+    val expiresAt: Instant,
+    val enrollmentId: String? = null,
+    /** What this gateway announced beyond the base contract (`"features":["raspSummary"]`); empty for an older one. */
+    val features: Set<String> = emptySet(),
+)
 
 /** `200` of `whoami` (S3 §5.8c). */
 internal class Whoami(val deviceId: String, val session: String)
@@ -71,9 +77,11 @@ internal class GatewayClient(
     fun renewChallenge(mtls: OkHttpClient): GatewayResult<Challenge> =
         call(mtls, Request.Builder().url(appBase.resolve("/v1/device/renew/challenge")!!).get(), ::challenge)
 
-    fun renew(mtls: OkHttpClient, csr: ByteArray, chain: List<ByteArray>, continuitySig: ByteArray): GatewayResult<IssuedCert> {
+    /** [raspSummary] (with a v2 [continuitySig]) only when the challenge announced `raspSummary`. */
+    fun renew(mtls: OkHttpClient, csr: ByteArray, chain: List<ByteArray>, continuitySig: ByteArray, raspSummary: ByteArray? = null): GatewayResult<IssuedCert> {
         val body = JSONObject().put("csr", b64.encodeToString(csr)).put("attestationChain", JSONArray(chain.map(b64::encodeToString)))
             .put("continuitySig", b64.encodeToString(continuitySig))
+        raspSummary?.let { body.put("raspSummary", b64.encodeToString(it)) }
         return call(mtls, post(appBase, "/v1/device/renew", body.bytes()), ::issued)
     }
 
@@ -86,9 +94,10 @@ internal class GatewayClient(
     fun reattestChallenge(certSerialHex: String): GatewayResult<Challenge> =
         call(pinned, post(enrollBase, "/v1/device/reattest/challenge", JSONObject().put("certSerial", certSerialHex).bytes()), ::challenge)
 
-    fun reattestFinish(certSerialHex: String, csr: ByteArray, chain: List<ByteArray>, continuitySig: ByteArray): GatewayResult<IssuedCert> {
+    fun reattestFinish(certSerialHex: String, csr: ByteArray, chain: List<ByteArray>, continuitySig: ByteArray, raspSummary: ByteArray? = null): GatewayResult<IssuedCert> {
         val body = JSONObject().put("certSerial", certSerialHex).put("csr", b64.encodeToString(csr))
             .put("attestationChain", JSONArray(chain.map(b64::encodeToString))).put("continuitySig", b64.encodeToString(continuitySig))
+        raspSummary?.let { body.put("raspSummary", b64.encodeToString(it)) }
         return call(pinned, post(enrollBase, "/v1/device/reattest/finish", body.bytes()), ::issued)
     }
 
@@ -147,7 +156,14 @@ internal class GatewayClient(
 
     private fun malformed(e: Exception) = GatewayResult.Failed(IOException("malformed gateway response", e))
 
-    private fun challenge(j: JSONObject) = Challenge(unb64.decode(j.getString("nonce")), Instant.parse(j.getString("expiresAt")))
+    private fun challenge(j: JSONObject) =
+        Challenge(unb64.decode(j.getString("nonce")), Instant.parse(j.getString("expiresAt")), features = features(j))
+
+    /** Anything but an array of strings is "nothing announced": a field this version cannot read must not break the renewal. */
+    private fun features(j: JSONObject): Set<String> {
+        val a = j.optJSONArray("features") ?: return emptySet()
+        return (0 until a.length()).mapNotNull { a.opt(it) as? String }.toSet()
+    }
 
     private fun issued(j: JSONObject): IssuedCert {
         val certs = j.getJSONArray("certChain")

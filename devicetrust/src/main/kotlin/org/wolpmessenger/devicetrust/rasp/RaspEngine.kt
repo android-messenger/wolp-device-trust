@@ -70,6 +70,9 @@ internal class RaspEngine(
     @Volatile
     private var nativeOk = false
 
+    /** Whether the native half answered and verified in the latest pass (the RASP summary, FR-035). */
+    val nativeRan: Boolean get() = nativeOk
+
     override suspend fun scan(): RaspReport = withContext(Dispatchers.IO) { confirmed() }
 
     /**

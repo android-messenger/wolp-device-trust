@@ -27,6 +27,9 @@ import org.wolpmessenger.devicetrust.net.GatewayClient
 import org.wolpmessenger.devicetrust.net.GatewayError
 import org.wolpmessenger.devicetrust.net.GatewayResult
 import org.wolpmessenger.devicetrust.net.IssuedCert
+import org.wolpmessenger.devicetrust.rasp.RaspSummary
+import org.wolpmessenger.devicetrust.rasp.RaspSummarySource
+import org.wolpmessenger.devicetrust.rasp.RaspSummaryStore
 import org.wolpmessenger.devicetrust.store.ActiveCert
 import org.wolpmessenger.devicetrust.store.Phase
 import org.wolpmessenger.devicetrust.store.StoredState
@@ -95,6 +98,7 @@ internal class CertManager(
     private val emit: (TrustEvent) -> Unit,
     private val integrity: suspend () -> RaspReport = { RaspReport.CLEAN },
     private val alerts: AlertSink = AlertSink.None,
+    private val summary: RaspSummarySource = RaspSummarySource.None,
 ) {
     fun isBlocked(): Boolean = store.load().phase == Phase.BLOCKED
 
@@ -125,7 +129,7 @@ internal class CertManager(
             is GatewayResult.Refused -> return onDenied(r.error, s)
             is GatewayResult.Failed -> return
         }
-        when (val r = rotate(s, ContinuitySig.RENEW, challenge) { csr, chain, sig -> gateway.renew(oldClient, csr, chain, sig) }) {
+        when (val r = rotate(s, ContinuitySig.RENEW, challenge) { csr, chain, sig, sum -> gateway.renew(oldClient, csr, chain, sig, sum) }) {
             is Rotation.Issued -> {
                 switchToPending()
                 // S2 §6.3 п. 7: confirm with the NEW key; an optimisation — the old cert expires from the gateway anyway.
@@ -152,7 +156,7 @@ internal class CertManager(
             is GatewayResult.Refused -> return onDenied(r.error, s)
             is GatewayResult.Failed -> return
         }
-        when (val r = rotate(s, ContinuitySig.REATTEST, challenge) { csr, chain, sig -> gateway.reattestFinish(active.serialHex, csr, chain, sig) }) {
+        when (val r = rotate(s, ContinuitySig.REATTEST, challenge) { csr, chain, sig, sum -> gateway.reattestFinish(active.serialHex, csr, chain, sig, sum) }) {
             is Rotation.Issued -> {
                 switchToPending()
                 dropKey(active) // the gateway retires the old certificate at once (S3 §5.6): no confirm
@@ -172,12 +176,15 @@ internal class CertManager(
      * New key bound to the nonce, CSR, continuitySig by the current key, send; on success the
      * new certificate is recorded as `pending` (S2 §6.3 п. 5). On a non-destructive error the
      * new key is deleted.
+     *
+     * The RASP summary and continuitySig v2 go only to a gateway whose challenge announced
+     * `raspSummary` (FR-035): an older gateway verifies v1 only and would revoke the device.
      */
     private suspend fun rotate(
         s: StoredState,
         prefix: String,
         challenge: Challenge,
-        send: (csr: ByteArray, chain: List<ByteArray>, sig: ByteArray) -> GatewayResult<IssuedCert>,
+        send: (csr: ByteArray, chain: List<ByteArray>, sig: ByteArray, raspSummary: ByteArray?) -> GatewayResult<IssuedCert>,
     ): Rotation {
         val active = s.active!!
         val deviceId = s.deviceId ?: return Rotation.Failed
@@ -187,11 +194,16 @@ internal class CertManager(
             is KeyGenResult.SoftwareKeystore -> return Rotation.Failed
         }
         val chainDer = key.chain.map { it.encoded }
+        // best effort: a summary that cannot be read must not stop the renewal — it goes as v1, without one
+        val sum: RaspSummary? = if (RaspSummaryStore.FEATURE in challenge.features) runCatching { summary.snapshot() }.getOrNull() else null
         val (csr, sig) = try {
             io {
                 val pub = keys.publicKey(newAlias)!!
                 val csr = Csr.build(pub, keys.privateKey(newAlias)!!)
-                val payload = ContinuitySig.payload(prefix, deviceId, BigInteger(active.serialHex, 16), challenge.nonce, pub.encoded, chainDer)
+                val serial = BigInteger(active.serialHex, 16)
+                val payload =
+                    if (sum == null) ContinuitySig.payload(prefix, deviceId, serial, challenge.nonce, pub.encoded, chainDer)
+                    else ContinuitySig.payloadV2(ContinuitySig.v2(prefix), deviceId, serial, challenge.nonce, pub.encoded, chainDer, sum.bytes)
                 val sig = Signature.getInstance("SHA256withECDSA").run { initSign(keys.privateKey(active.alias)!!); update(payload); sign() }
                 csr to sig
             }
@@ -200,12 +212,13 @@ internal class CertManager(
             return Rotation.Failed
         }
 
-        return when (val r = io { send(csr, chainDer, sig) }) {
+        return when (val r = io { send(csr, chainDer, sig, sum?.bytes) }) {
             is GatewayResult.Ok -> {
                 val issued = r.value
                 val cert = ActiveCert(newAlias, issued.certChain.first().serialNumber.toString(16), issued.notBefore, issued.notAfter, issued.renewAfter)
                 store.writeChain(KeystoreKeys.deviceKeyNumber(newAlias)!!, issued.certChain)
                 store.update { it.copy(pending = cert) }
+                sum?.let { runCatching { summary.sent(it) } }
                 Rotation.Issued(cert)
             }
             is GatewayResult.Refused -> {
