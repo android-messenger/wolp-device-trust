@@ -46,6 +46,7 @@ import org.wolpmessenger.devicetrust.attest.Precheck
 import org.wolpmessenger.devicetrust.attest.RaspScanner
 import org.wolpmessenger.devicetrust.rasp.AndroidRaspEnv
 import org.wolpmessenger.devicetrust.rasp.EffectivePolicy
+import org.wolpmessenger.devicetrust.rasp.IntegrityGate
 import org.wolpmessenger.devicetrust.rasp.KotlinChecks
 import org.wolpmessenger.devicetrust.rasp.NativeChecks
 import org.wolpmessenger.devicetrust.rasp.RaspEngine
@@ -104,7 +105,8 @@ public object DeviceTrust {
         val store = TrustStore(dir)
         val keys = KeystoreKeys.android()
         val clock = TrustClock(AndroidClockSource(app), store.load().clock)
-        val vault = EnvelopeVault.android(app)
+        val gate = IntegrityGate()
+        val vault = EnvelopeVault.android(app) { gate.require() }
         val versionCodeEarly: Long = app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
         val precheckCache = FilePrecheckCache(File(dir, "precheck.properties"))
         val digests = KotlinChecks.normalize(config.expectedSigningDigests)
@@ -115,7 +117,21 @@ public object DeviceTrust {
         )
         lateinit var alertsRef: Alerts
         // every RASP pass queues its REPORT findings (rate-limited, S2 §7.4)
-        val scanner = RaspScanner { engine.scan().also { r -> if (r.reports.isNotEmpty()) alertsRef.report(r.reports) } }
+        // …and decides whether the Vault may hand out secrets: every pass goes through here (start-up,
+        // foreground, precheck, renewal), so the gate always reflects the latest one
+        val scanner = RaspScanner {
+            val r = try {
+                engine.scan()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                gate.record(open = false) // a pass that could not run proves nothing
+                throw e
+            }
+            gate.record(engine.allowsSecrets(r))
+            if (r.reports.isNotEmpty()) alertsRef.report(r.reports)
+            r
+        }
         val precheck = Precheck.android(app, config, scanner)
         val onServerDate: (String?) -> Unit = { date -> clock.onPinnedResponse(date)?.let { anchor -> store.update { it.copy(clock = anchor) } } }
         val http = DeviceHttp(config, current = { core?.clientCredentials() }, onServerDate = onServerDate)

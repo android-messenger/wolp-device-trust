@@ -146,4 +146,21 @@ class StoreAndCoreTest {
         val client = HttpClients.pinned(ok)
         assertEquals(4, client.certificatePinner.pins.size) // 2 hosts × 2 pins
     }
+
+    /** specs/001-rasp-hardening FR-021: the state is read from memory, yet a file changed by someone else is noticed. */
+    @Test
+    fun `state is cached and follows the file`() {
+        val dir = tmp.newFolder("cache")
+        val a = TrustStore(dir)
+        a.save(StoredState(phase = Phase.ENROLLED, deviceId = "01A"))
+        assertTrue("same object: no re-parse", a.load() === a.load())
+        a.update { it.copy(deviceId = "01AB") }
+        assertEquals("01AB", a.load().deviceId)
+
+        TrustStore(dir).save(StoredState(phase = Phase.BLOCKED, blockReason = "RASP")) // another writer
+        assertEquals(Phase.BLOCKED, a.load().phase)
+
+        java.io.File(dir, "state.json").delete()
+        assertEquals(Phase.NOT_ENROLLED, a.load().phase)
+    }
 }

@@ -66,14 +66,51 @@ internal class RaspEngine(
     private val native: () -> NativeResult,
     private val policy: EffectivePolicy,
 ) : RaspScanner {
-    override suspend fun scan(): RaspReport = withContext(Dispatchers.IO) { evaluate() }
+    /** Whether the native half answered and verified in the latest [evaluate]. */
+    @Volatile
+    private var nativeOk = false
+
+    override suspend fun scan(): RaspReport = withContext(Dispatchers.IO) { confirmed() }
+
+    /**
+     * A BLOCK finding of a heuristic check wipes the device only if an immediate second pass still
+     * shows it (specs/001-rasp-hardening FR-016): one sample of `/proc` is not enough for an
+     * irreversible reaction. An unconfirmed one is reported, marked `unconfirmed`. Checks that
+     * cannot flicker (the APK signer, the debuggable flag, the cached Keystore level) need no second pass.
+     */
+    fun confirmed(): RaspReport {
+        val first = evaluate()
+        if (first.blocking.none { it.id in SECOND_PASS }) return first
+        val still = evaluate().blocking.map { it.id }.toSet()
+        return RaspReport(first.findings.map { f ->
+            if (f.reaction == RaspReaction.BLOCK && f.id in SECOND_PASS && f.id !in still) f.copy(reaction = RaspReaction.REPORT, detail = "unconfirmed;BLOCK;${f.detail}")
+            else f
+        })
+    }
+
+    /**
+     * Whether secrets may be used after [report] (IntegrityGate): no wiping finding, and — in a
+     * release build — the native checks really ran. Without them the pass proves nothing, and
+     * "library failed to load" is the cheapest way to switch half of the checks off (FR-018).
+     */
+    fun allowsSecrets(report: RaspReport): Boolean = report.blocking.isEmpty() && (nativeOk || policy.kind != BuildKind.RELEASE)
+
+    internal companion object {
+        /** Heuristic checks: confirmed by a second pass before the BLOCK reaction. */
+        val SECOND_PASS = setOf(
+            RaspCheck.ROOT_SU, RaspCheck.ROOT_MAGISK, RaspCheck.ROOT_PROPS, RaspCheck.HOOK_FRIDA_MAPS, RaspCheck.HOOK_FRIDA_PORT,
+            RaspCheck.HOOK_XPOSED, RaspCheck.HOOK_TAMPER, RaspCheck.DEBUGGER, RaspCheck.EMULATOR,
+        )
+    }
 
     fun evaluate(): RaspReport {
         val raw = mutableListOf<RawFinding>()
         val dual = kotlin.dual()
         dual.forEach { (id, p) -> if (p.state == ProbeState.FOUND) raw += RawFinding(id, p.detail) }
         raw += kotlin.single()
-        when (val n = native()) {
+        val n = native()
+        nativeOk = n is NativeResult.Ok
+        when (n) {
             is NativeResult.Ok -> {
                 for ((id, p) in n.probes) {
                     val k = dual[id]

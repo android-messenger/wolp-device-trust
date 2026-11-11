@@ -61,6 +61,12 @@ internal class TrustStore(dir: File) {
 
     private val lock = Any()
 
+    /** Last state read or written, with the (mtime, length) of the file it belongs to. */
+    private var cached: Pair<Pair<Long, Long>, StoredState>? = null
+    private val chains = HashMap<Int, Pair<Pair<Long, Long>, List<X509Certificate>>>()
+
+    private fun stamp(f: File): Pair<Long, Long> = f.lastModified() to f.length()
+
     /**
      * A file that cannot be parsed (writes are atomic, so this means damage from outside) is set
      * aside as `state.json.corrupt` and the device starts over as `NOT_ENROLLED`: the start-up
@@ -69,9 +75,16 @@ internal class TrustStore(dir: File) {
      * damage and still propagates.
      */
     fun load(): StoredState = synchronized(lock) {
-        if (!stateFile.exists()) return StoredState()
+        if (!stateFile.exists()) {
+            cached = null
+            return StoredState()
+        }
+        // `load` runs on every TLS handshake and state query: answer from memory while the file is
+        // the one this instance last read or wrote (FR-021); a stat is all that is left on that path
+        val stamp = stamp(stateFile)
+        cached?.takeIf { it.first == stamp }?.let { return it.second }
         try {
-            fromJson(JSONObject(stateFile.readText()))
+            fromJson(JSONObject(stateFile.readText())).also { cached = stamp to it }
         } catch (e: org.json.JSONException) {
             setAside(e)
         } catch (e: IllegalArgumentException) { // unknown Phase, bad base64
@@ -82,6 +95,7 @@ internal class TrustStore(dir: File) {
     }
 
     private fun setAside(e: Exception): StoredState {
+        cached = null
         Journal.event("state_corrupt", e.javaClass.simpleName)
         val aside = File(stateFile.parentFile, stateFile.name + ".corrupt")
         aside.delete()
@@ -91,6 +105,7 @@ internal class TrustStore(dir: File) {
 
     fun save(state: StoredState): Unit = synchronized(lock) {
         AtomicFiles.write(stateFile, toJson(state).toString().toByteArray())
+        cached = stamp(stateFile) to state
     }
 
     /** Read-modify-write under one lock, so concurrent writers (clock anchor, enrollment) never lose updates. */
@@ -108,10 +123,18 @@ internal class TrustStore(dir: File) {
 
     fun readChain(keyNumber: Int): List<X509Certificate>? {
         val f = File(certsDir, "$keyNumber.pem")
-        if (!f.exists()) return null
-        return CertificateFactory.getInstance("X.509")
-            .generateCertificates(ByteArrayInputStream(f.readBytes()))
-            .map { it as X509Certificate }
+        synchronized(lock) {
+            if (!f.exists()) {
+                chains.remove(keyNumber)
+                return null
+            }
+            val stamp = stamp(f)
+            chains[keyNumber]?.takeIf { it.first == stamp }?.let { return it.second }
+            return CertificateFactory.getInstance("X.509")
+                .generateCertificates(ByteArrayInputStream(f.readBytes()))
+                .map { it as X509Certificate }
+                .also { chains[keyNumber] = stamp to it }
+        }
     }
 
     fun deleteChainsExcept(keep: Set<Int>) {

@@ -1,6 +1,8 @@
 package org.wolpmessenger.devicetrust
 
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -175,4 +177,37 @@ class VaultTest {
     }
 
     private fun ByteArray.toHex() = joinToString("") { "%02x".format(it) }
+
+    // ---------------------------------------------------------------- specs/001-rasp-hardening, story 3
+
+    @Test
+    fun `nothing is wrapped or unwrapped until an integrity pass allowed it`() = runTest {
+        val gate = org.wolpmessenger.devicetrust.rasp.IntegrityGate(waitMs = 50)
+        val v = EnvelopeVault(kek, dekFile, UnlockState { unlocked }, SecureRandom(), gate = { gate.require() })
+        v.provision()
+        assertVault<VaultException.Locked> { v.wrap(byteArrayOf(1), VaultPurpose.E2EE) } // no pass yet
+
+        gate.record(open = true)
+        val blob = v.wrap(byteArrayOf(1, 2, 3), VaultPurpose.E2EE)
+        assertArrayEquals(byteArrayOf(1, 2, 3), v.unwrap(blob, VaultPurpose.E2EE))
+
+        gate.record(open = false) // a later pass found something, or could not run
+        assertVault<VaultException.Locked> { v.unwrap(blob, VaultPurpose.E2EE) }
+        assertEquals("closed is not a wipe", VaultKeys.PRESENT, v.keys())
+
+        gate.record(open = true)
+        assertArrayEquals(byteArrayOf(1, 2, 3), v.unwrap(blob, VaultPurpose.E2EE))
+    }
+
+    @Test
+    fun `a waiting caller gets through as soon as the first pass ends`() = runTest {
+        val gate = org.wolpmessenger.devicetrust.rasp.IntegrityGate(waitMs = 60_000)
+        val v = EnvelopeVault(kek, dekFile, UnlockState { unlocked }, SecureRandom(), gate = { gate.require() })
+        v.provision()
+        val waiting = async { v.wrap(byteArrayOf(7), VaultPurpose.E2EE) }
+        yield()
+        assertFalse(waiting.isCompleted)
+        gate.record(open = true)
+        assertTrue(waiting.await().isNotEmpty())
+    }
 }

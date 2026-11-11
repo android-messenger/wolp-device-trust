@@ -34,6 +34,8 @@ public class EnvelopeVault internal constructor(
     private val dekFile: File,
     private val unlock: UnlockState,
     private val random: SecureRandom = SecureRandom(),
+    /** Throws [VaultException.Locked] while secrets must not be used (rasp/IntegrityGate); checked on every wrap / unwrap. */
+    private val gate: suspend () -> Unit = {},
 ) : Vault {
     private val loadMutex = Mutex()
 
@@ -101,6 +103,7 @@ public class EnvelopeVault internal constructor(
     }
 
     private suspend fun loadedDek(): ByteArray {
+        gate()
         dek?.let { return it }
         return loadMutex.withLock {
             dek ?: loadDek().also { dek = it }
@@ -140,10 +143,13 @@ public class EnvelopeVault internal constructor(
         private const val GCM = "AES/GCM/NoPadding"
 
         /** Vault over the platform Keystore; DEK file in `noBackupFilesDir/dt/dek.bin` (S2 §11). */
-        public fun android(context: Context): EnvelopeVault = EnvelopeVault(
+        public fun android(context: Context): EnvelopeVault = android(context) {}
+
+        internal fun android(context: Context, gate: suspend () -> Unit): EnvelopeVault = EnvelopeVault(
             kek = AndroidKek(),
             dekFile = File(context.noBackupFilesDir, "dt/dek.bin"),
             unlock = UnlockState.android(context),
+            gate = gate,
         )
     }
 }

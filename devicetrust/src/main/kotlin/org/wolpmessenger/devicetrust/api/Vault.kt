@@ -17,8 +17,11 @@ public sealed class VaultException(message: String, cause: Throwable? = null) : 
     /** The vault keys were destroyed (BLOCK, unenroll) or never created. Data wrapped before is unrecoverable. */
     public class KeyGone(message: String = "vault key is gone", cause: Throwable? = null) : VaultException(message, cause)
 
-    /** Before the first unlock after boot the vault files are unavailable (credential-encrypted storage). */
-    public class Locked : VaultException("device not unlocked since boot")
+    /**
+     * Temporarily unavailable, nothing is lost: before the first unlock after boot (credential-encrypted
+     * storage), or while the integrity check of this process has not passed (see `DeviceTrust.checkIntegrity`).
+     */
+    public class Locked(message: String = "device not unlocked since boot") : VaultException(message)
 
     /** Damaged blob, unknown format, or wrong purpose / extra AAD. */
     public class Corrupt(message: String = "vault blob rejected", cause: Throwable? = null) : VaultException(message, cause)
