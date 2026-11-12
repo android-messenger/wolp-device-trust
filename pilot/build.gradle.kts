@@ -86,7 +86,14 @@ android {
             signingConfig = signingConfigs.findByName("release")
         }
     }
+    // libsignal (specs/002, FR-035): its AAR requires desugaring; it also brings a test-only native
+    // library and, in its jar, builds for Linux, macOS and Windows — tens of megabytes an APK does not need
+    packaging {
+        jniLibs.excludes += "**/libsignal_jni_testing.so"
+        resources.excludes += listOf("libsignal_jni*.so", "libsignal_jni*.dylib", "signal_jni*.dll")
+    }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -98,6 +105,7 @@ kotlin {
 
 dependencies {
     implementation(project(":devicetrust"))
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
     implementation(libs.kotlinx.coroutines.android)
 }
 
