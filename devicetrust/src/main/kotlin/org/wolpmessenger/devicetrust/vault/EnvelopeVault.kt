@@ -154,7 +154,8 @@ public class EnvelopeVault internal constructor(
     public suspend fun wipe(): Unit = loadMutex.withLock { wipeLocked() }
 
     private fun wipeLocked() {
-        dek?.fill(0)
+        // the reference is dropped, not zeroed (as in evictUnlockedKey): a wrap that already holds the
+        // array would otherwise encrypt with a key of zeroes and leave that blob on disk
         dek = null
         dekFile.delete()
         kek.delete()

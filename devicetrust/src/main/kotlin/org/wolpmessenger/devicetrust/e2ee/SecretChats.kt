@@ -237,6 +237,12 @@ internal class SecretChats(
             account.preKeys[id] = PreKeyRecord(id, pair).serialize()
             OneTimeKey(id, pair.publicKey.serialize())
         }
+        // The directory holds no more of this device's one-time keys than it was sent since the record
+        // was last replaced; the oldest beyond the limit belong to records that are gone. A first message
+        // that still names one is undecryptable and comes back through recovery.
+        if (account.preKeys.size > MAX_ONE_TIME) {
+            account.preKeys.keys.sorted().take(account.preKeys.size - MAX_ONE_TIME).forEach(account.preKeys::remove)
+        }
         store.save(account)
         val signed = SignedPreKeyRecord(account.signed.getValue(account.currentSignedId).record)
         val kyber = KyberPreKeyRecord(account.kyber.getValue(account.currentKyberId).record)
@@ -422,5 +428,8 @@ internal class SecretChats(
         private val B64 = Base64.getUrlEncoder().withoutPadding()
         private const val DEVICE = 1
         private const val KEEP_REPLACED_MS = 30L * 24 * 60 * 60 * 1000
+
+        /** One-time prekeys kept on the phone: twice what [KeySync] keeps in the directory. */
+        const val MAX_ONE_TIME = 2 * KeySync.FULL
     }
 }

@@ -569,4 +569,41 @@ class SecretChatsTest {
     private companion object {
         const val DEVICE = "01JCZ8K3W9D5V7H2Q4N6M8P0RT"
     }
+
+    @Test
+    fun `one-time keys kept on the phone are bounded, the newest still work`() = runTest {
+        val (alice, bob) = pair()
+        val account = File(alice.files, "account.bin")
+        val first = alice.chats.ownKeys(100).oneTimePreKeys.first()
+        repeat(2) { alice.chats.ownKeys(100) }
+        val size = account.length() // 305 made so far, the limit is reached
+        repeat(4) { alice.chats.ownKeys(100) }
+        val last = alice.chats.ownKeys(100).oneTimePreKeys.last()
+        // 500 more keys: without the limit the file would be about 2.5 times as long (ids take a few more bytes)
+        assertTrue("the file stops growing: $size -> ${account.length()}", account.length() < size * 1.05)
+
+        // a first message built on a key that was dropped is undecryptable (it comes back through recovery)…
+        directory.oneTime["alice"] = ArrayDeque(listOf(first))
+        refused(E2eeFailure.UNDECRYPTABLE) { alice.chats.decrypt("bob", bob.chats.encrypt("alice", "old key")) }
+        // …one built on a recent key is read
+        val carol = Phone("carol", directory).enroll()
+        directory.oneTime["alice"] = ArrayDeque(listOf(last))
+        assertEquals("new key", alice.chats.decrypt("carol", carol.chats.encrypt("alice", "new key")))
+    }
+
+    @Test
+    fun `a damaged peer file - the lost verified mark is shown as a changed key until the user has seen it`() = runTest {
+        val (alice, bob) = pair()
+        assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
+        bob.chats.setVerified("alice", true, bob.chats.safetyNumber("alice"))
+        assertEquals(PeerTrust.VERIFIED to false, bob.chats.peerState("alice"))
+
+        bob.files.listFiles()!!.single { it.name.startsWith("p-") }.writeBytes(ByteArray(64))
+        refused(E2eeFailure.UNDECRYPTABLE) { bob.chats.decrypt("alice", alice.chats.encrypt("bob", "two")) }
+
+        bob.chats = bob.start() // the mark is on disk
+        assertEquals(PeerTrust.UNVERIFIED to true, bob.chats.peerState("alice"))
+        bob.chats.keyChangeSeen("alice")
+        assertEquals(PeerTrust.UNVERIFIED to false, bob.chats.peerState("alice"))
+    }
 }
