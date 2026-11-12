@@ -28,6 +28,7 @@ import org.signal.libsignal.protocol.state.PreKeyRecord
 import org.signal.libsignal.protocol.state.SessionRecord
 import org.signal.libsignal.protocol.state.SignalProtocolStore
 import org.signal.libsignal.protocol.state.SignedPreKeyRecord
+import org.wolpmessenger.devicetrust.Journal
 import org.wolpmessenger.devicetrust.api.E2eeException
 import org.wolpmessenger.devicetrust.api.E2eeFailure
 import org.wolpmessenger.devicetrust.api.Vault
@@ -95,12 +96,14 @@ internal class SecretChats(
                 // trap: the builder takes (store, remote, local), the cipher (store, local, remote)
                 SessionBuilder(signal, signal.remote, self).process(bundle(fresh), at)
             } catch (e: Exception) {
+                cause("session", e)
                 throw E2eeException(E2eeFailure.BAD_PASSPORT, e) // a prekey not signed by the identity key it came with
             }
         }
         val message = try {
             SessionCipher(signal, self, signal.remote).encrypt(text.toByteArray(), at)
         } catch (e: Exception) {
+            cause("encrypt", e)
             throw E2eeException(E2eeFailure.UNDECRYPTABLE, e)
         }
         // FR-013: until the peer answers, every message carries the passport — the peer checks it without the directory
@@ -108,6 +111,14 @@ internal class SecretChats(
         commit(account, state)
         ENVELOPE + message.type + "." + B64.encodeToString(message.serialize()) + passport
     }
+
+    /**
+     * What libsignal said when a step failed. The refusal code alone ("bad_passport", "undecryptable")
+     * does not tell a wrong key from a broken build; the class and the first line of the message do.
+     * libsignal's messages name ids and addresses, never key material.
+     */
+    private fun cause(step: String, e: Exception) =
+        Journal.event("e2ee_failed", "$step ${e.javaClass.name}: ${e.message.orEmpty().lineSequence().firstOrNull().orEmpty().take(160)}")
 
     /**
      * Decides whether [identityKey] is [user]'s key (FR-012 – FR-015). A key accepted before is not
@@ -161,6 +172,7 @@ internal class SecretChats(
         } catch (e: DuplicateMessageException) {
             throw E2eeException(E2eeFailure.DUPLICATE, e)
         } catch (e: Exception) {
+            cause("decrypt", e)
             throw E2eeException(E2eeFailure.UNDECRYPTABLE, e)
         }
         commit(account, state)
