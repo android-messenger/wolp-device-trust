@@ -24,9 +24,10 @@
 
 | Что | Как |
 |---|---|
-| Зависимость | Репозиторий подключается git-подмодулем; в `settings.gradle.kts` приложения — `includeBuild("third_party/wolp-device-trust")` с подстановкой `substitute(module("org.wolpmessenger:devicetrust")).using(project(":devicetrust"))`; в модуле приложения — `implementation("org.wolpmessenger:devicetrust")`. Вместе с библиотекой приходят OkHttp (он часть API), WorkManager, `lifecycle-process` и корутины |
+| Зависимость | Репозиторий подключается git-подмодулем; в `settings.gradle.kts` приложения — `includeBuild("third_party/wolp-device-trust")` с подстановкой `substitute(module("org.wolpmessenger:devicetrust")).using(project(":devicetrust"))`; в модуле приложения — `implementation("org.wolpmessenger:devicetrust")`. Вместе с библиотекой приходят OkHttp (он часть API), WorkManager, `lifecycle-process`, корутины и `libsignal` |
 | `minSdk` | 33 |
 | `ndkVersion` | Обязательно указать в модуле приложения (библиотека собирается с `28.2.13676358`). Приложение удаляет отладочную информацию из `libwolpdt.so` своим NDK; если NDK не установлен, библиотека попадёт в APK с символами |
+| `libsignal` | С библиотекой приходит `org.signal:libsignal-android` (секретные чаты, AGPL-3.0); его репозиторий Maven — `https://build-artifacts.signal.org/libraries/maven/`, подключается в `settings.gradle.kts` приложения. Модулю приложения нужно: `isCoreLibraryDesugaringEnabled = true` с зависимостью `coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")` — без этого сборка падает; `packaging { jniLibs.excludes += "**/libsignal_jni_testing.so"; resources.excludes += listOf("libsignal_jni*.so", "libsignal_jni*.dylib", "signal_jni*.dll") }` — без этого в APK попадают тестовая библиотека и сборки для Linux, macOS и Windows, больше 200 МБ. Выпускной APK собирается только для `arm64-v8a` (`abiFilters`): на один набор команд `libsignal` добавляет около 10 МБ |
 | R8 | Включить. Правила библиотеки (`consumer-rules.pro` сохраняет класс с native-методом) подключаются сами |
 | Манифест | Библиотека добавляет разрешение `INTERNET` и блок `<queries>` с пакетами менеджеров root. Разрешение `QUERY_ALL_PACKAGES` не нужно |
 | Подпись | Продуктовая и пилотная сборки подписываются одним release-ключом. SHA-256 его сертификата передаётся в `expectedSigningDigests` |

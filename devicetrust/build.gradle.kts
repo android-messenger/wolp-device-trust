@@ -135,7 +135,13 @@ android {
             version = "3.22.1"
         }
     }
+    // this module's test APK only; an app excludes the same files itself (see pilot/build.gradle.kts)
+    packaging {
+        jniLibs.excludes += "**/libsignal_jni_testing.so"
+        resources.excludes += listOf("libsignal_jni*.so", "libsignal_jni*.dylib", "signal_jni*.dll")
+    }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true // libsignal's AAR demands it, also for this module's test APK
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -161,10 +167,12 @@ dependencies {
     implementation(libs.work.runtime) // RenewWorker (S2 §6.5)
     implementation(libs.lifecycle.process) // RASP on coming to the foreground (S2 §7.2)
 
+    // specs/002: secret-chat protocol. Every app module that takes this library needs three settings —
+    // core library desugaring and two packaging excludes, see pilot/build.gradle.kts
+    implementation(libs.libsignal.android)
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
+
     testImplementation(libs.junit)
-    // specs/002: tests only for now, so APKs do not grow before the protocol code exists. Moving it to
-    // `implementation` needs three settings in every app module — see "Что проверено до кода" in the spec
-    testImplementation(libs.libsignal.android)
     // real org.json for JVM tests (android.jar has only stubs)
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)

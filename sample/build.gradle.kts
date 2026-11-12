@@ -9,6 +9,8 @@ plugins {
 android {
     namespace = "org.wolpmessenger.devicetrust.sample"
     compileSdk = 36
+    // without an NDK here native libraries ship unstripped: libsignal_jni.so is 125 MB per ABI
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "org.wolpmessenger.devicetrust.sample"
@@ -19,7 +21,14 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true }
+    // libsignal (specs/002, FR-035): its AAR requires desugaring; it also brings a test-only native
+    // library and, in its jar, builds for Linux, macOS and Windows — tens of megabytes an APK does not need
+    packaging {
+        jniLibs.excludes += "**/libsignal_jni_testing.so"
+        resources.excludes += listOf("libsignal_jni*.so", "libsignal_jni*.dylib", "signal_jni*.dll")
+    }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -34,6 +43,7 @@ kotlin {
 
 dependencies {
     implementation(project(":devicetrust"))
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
     implementation(libs.kotlinx.coroutines.android)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
