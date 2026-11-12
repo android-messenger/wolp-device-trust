@@ -119,13 +119,15 @@ internal class SecretStore(private val dir: File, private val vault: Vault, priv
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            // only this peer is lost: the next message from them fails and comes back through recovery
+            // only this peer is lost: the next message from them fails and comes back through recovery.
+            // What was remembered — the key, a "verified" mark — is gone with the file, and the next key
+            // is accepted by its passport alone: the user is told the same way as about a changed key.
             Journal.event("e2ee_peer_reset")
-            peer.file.delete()
             peer.identity = null
             peer.session = null
             peer.trust = PeerTrust.UNVERIFIED
-            peer.changed = false
+            peer.changed = true
+            save(peer) // over the damaged file, so the mark outlives an operation that fails
         }
         return peer
     }
