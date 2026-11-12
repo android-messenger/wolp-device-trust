@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -34,6 +35,7 @@ import org.wolpmessenger.devicetrust.api.GatewayCode
 import org.wolpmessenger.devicetrust.api.SessionBinding
 import org.wolpmessenger.devicetrust.api.DeviceSecurityInfo
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
+import org.wolpmessenger.devicetrust.api.E2ee
 import org.wolpmessenger.devicetrust.api.EnrollResult
 import org.wolpmessenger.devicetrust.api.PrecheckResult
 import org.wolpmessenger.devicetrust.api.UnenrollResult
@@ -57,6 +59,8 @@ import org.wolpmessenger.devicetrust.cert.VaultOps
 import org.wolpmessenger.devicetrust.cert.Versions
 import org.wolpmessenger.devicetrust.clock.AndroidClockSource
 import org.wolpmessenger.devicetrust.clock.TrustClock
+import org.wolpmessenger.devicetrust.e2ee.E2eeService
+import org.wolpmessenger.devicetrust.e2ee.KeyDirectoryClient
 import org.wolpmessenger.devicetrust.enroll.Enroller
 import org.wolpmessenger.devicetrust.keys.KeystoreKeys
 import org.wolpmessenger.devicetrust.net.GatewayClient
@@ -73,7 +77,7 @@ import java.time.Instant
  * The only entry point for the application (S2 §4). Implemented so far: init (with the S2 §6.6
  * reconciliation), state, credentialsVersion, events, trustNow, precheck, enroll, ensureFresh
  * (renewal / recovery), onGatewayDenied, checkSessionBinding, unenroll, clientCredentials,
- * checkIntegrity (RASP), okHttpClient, updateHttpClient, vault, deviceInfo.
+ * checkIntegrity (RASP), okHttpClient, updateHttpClient, vault, deviceInfo, e2ee (secret chats).
  */
 public object DeviceTrust {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -91,6 +95,7 @@ public object DeviceTrust {
     private var core: DeviceTrustCore? = null
     private var vaultImpl: EnvelopeVault? = null
     private var deviceHttp: DeviceHttp? = null
+    private var e2eeImpl: E2eeService<KeyDirectoryClient>? = null
 
     internal val isInitialized: Boolean get() = core != null
 
@@ -99,6 +104,7 @@ public object DeviceTrust {
     public fun init(context: Context, config: DeviceTrustConfig) {
         if (core != null) return
         config.validateForNetwork()
+        val passportTrust = E2eeService.trust(config.e2eeRoots, config.e2eeIssuers)
         val app = context.applicationContext
         val debuggable = (app.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         require(debuggable || config.expectedSigningDigests.isNotEmpty()) { "expectedSigningDigests is required in a non-debuggable app (APK_SIGNATURE, S2 §7.1)" }
@@ -169,12 +175,20 @@ public object DeviceTrust {
         )
         val sender = AlertSender(queue, alerts, gateway, config.cookieProvider, clock::now)
         val c = DeviceTrustCore(config, store, clock, precheck, enroller, certs, eventSink, sender, appClient = { http.client }, gateway = gateway, rasp = scanner::scan)
+        // secret chats (specs/002): the key directory is behind the app host, reached with the device certificate
+        val e2ee = passportTrust?.let {
+            val directory = KeyDirectoryClient({ http.client }, config.appBaseUrl.toHttpUrl(), config.cookieProvider)
+            E2eeService(File(dir, "e2ee"), vault, store, keys, it, directory, alerts, clock::now)
+        }
         vaultImpl = vault
         deviceHttp = http
+        e2eeImpl = e2ee
         core = c
         // pooled connections stay authenticated with the old certificate (S2 §10)
         scope.launch { c.credentialsVersion.collect { http.onCredentialsChanged() } }
-        Handler(Looper.getMainLooper()).post { ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundRasp(c, config)) }
+        // a renewed certificate means a new passport: the record in the key directory follows it (FR-023)
+        if (e2ee != null) scope.launch { c.credentialsVersion.drop(1).collect { e2ee.syncIfDue() } }
+        Handler(Looper.getMainLooper()).post { ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundRasp(c, config, e2ee)) }
         scope.launch {
             // Each step on its own: an uncaught exception here would kill the process (no handler
             // on this scope), and a failed step must not cancel the ones after it.
@@ -185,6 +199,7 @@ public object DeviceTrust {
             step("renew_worker") { RenewWorker.schedule(app, config.workInterval) }
             step("alert_worker") { if (!queue.isEmpty()) AlertWorker.schedule(app) }
             step("ensure_fresh") { c.ensureFresh() }
+            step("e2ee_sync") { e2ee?.syncIfDue() }
             deadlineTimer(c)
         }
     }
@@ -200,7 +215,7 @@ public object DeviceTrust {
     }
 
     /** RASP when the app comes to the foreground and then every `raspIntervalForeground` while it stays there (S2 §7.2). */
-    private class ForegroundRasp(private val c: DeviceTrustCore, private val config: DeviceTrustConfig) : DefaultLifecycleObserver {
+    private class ForegroundRasp(private val c: DeviceTrustCore, private val config: DeviceTrustConfig, private val e2ee: E2eeService<*>?) : DefaultLifecycleObserver {
         private var job: Job? = null
 
         override fun onStart(owner: LifecycleOwner) {
@@ -209,6 +224,8 @@ public object DeviceTrust {
                 while (true) {
                     runCatching { c.checkIntegrity() }
                     runCatching { c.migrateVault() } // a no-op once done; the foreground is where the device is unlocked
+                    // the key directory record: published here at the latest, the keys need the device unlocked
+                    e2ee?.syncIfDue()
                     delay(config.raspIntervalForeground.inWholeMilliseconds)
                 }
             }
@@ -313,6 +330,12 @@ public object DeviceTrust {
     public fun updateHttpClient(): OkHttpClient = checkNotNull(deviceHttp) { "DeviceTrust.init() was not called" }.update
 
     public val vault: Vault get() = checkNotNull(vaultImpl) { "DeviceTrust.init() was not called" }
+
+    /**
+     * Secret chats (specs/002): what the app's bridge hands to the web app. Needs `e2eeRoots` and
+     * `e2eeIssuers` in the configuration.
+     */
+    public val e2ee: E2ee get() = checkNotNull(e2eeImpl) { "DeviceTrust.init() was not called, or e2eeRoots / e2eeIssuers are not configured" }
 
     /** Last precheck result details, or null before the first precheck. */
     public fun deviceInfo(): DeviceSecurityInfo? = core?.deviceInfo()

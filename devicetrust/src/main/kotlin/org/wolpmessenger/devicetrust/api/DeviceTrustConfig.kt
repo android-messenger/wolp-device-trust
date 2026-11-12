@@ -57,6 +57,15 @@ public data class DeviceTrustConfig(
     val pilotVersionCode: (Long) -> Boolean = { it % 100 >= 90 },
     /** Pilot / debug only: every BLOCK becomes a REPORT marked `dryRun` (S2 §7.3); ignored in a release build. */
     val raspDryRun: Boolean = false,
+    /**
+     * Secret chats (specs/002): the root certificates of the device authority of this contour, PEM
+     * text. A peer's key is accepted only with a device certificate that chains to one of them. A
+     * production build carries the production root only. Empty (with [e2eeIssuers]) — `DeviceTrust.e2ee`
+     * is off.
+     */
+    val e2eeRoots: List<String> = emptyList(),
+    /** SHA-256 of the public key (SPKI, hex) of every authority allowed to issue device certificates. */
+    val e2eeIssuers: List<String> = emptyList(),
 ) {
     /** Checks what the network side needs; called by `DeviceTrust.init`. */
     public fun validateForNetwork() {
