@@ -74,7 +74,7 @@ class SecretChatsTest {
 
         /** A new process over the same files. */
         fun start(v: EnvelopeVault = vault) =
-            SecretChats(user, files, v, directory, PassportCheck(ca.trust) { Instant.ofEpochMilli(clock) }, ::passport, { badPassports += it }) { clock }
+            SecretChats(user, files, v, directory, PassportCheck(ca.trust) { Instant.ofEpochMilli(clock) }, ::passport, { _, fault -> badPassports += fault }) { clock }
         var chats = start()
 
         suspend fun enroll(oneTime: Int = 5): Phone {

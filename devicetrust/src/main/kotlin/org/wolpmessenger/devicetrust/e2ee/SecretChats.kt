@@ -35,6 +35,8 @@ import java.io.File
 import java.time.Instant
 import java.util.Base64
 import java.util.UUID
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Secret-chat keys and encryption (specs/002, story 1): libsignal over files under the Vault.
@@ -46,7 +48,8 @@ import java.util.UUID
  * A peer's key is accepted only with a passport that passes [PassportCheck] (story 2); once
  * accepted it is remembered and the passport is not asked for again until the key changes.
  *
- * Not here yet: the HTTP client of the key directory (story 3), the bridge (story 4).
+ * The key directory is reached through [KeyDirectory] ([KeyDirectoryClient]); [KeySync] keeps this
+ * device's record there. The bridge is story 4.
  */
 internal class SecretChats(
     /** Own account id: the libsignal address name. A user has exactly one device, so the device id is always 1. */
@@ -58,7 +61,7 @@ internal class SecretChats(
     /** This device's passport for its identity key; throws [E2eeException] `NOT_ENROLLED` without a device certificate. */
     private val ownPassport: suspend (identityKey: ByteArray) -> Passport,
     /** A passport that failed a check: goes to the gateway through the alert channel (FR-017). */
-    private val onBadPassport: (PassportFault) -> Unit = {},
+    private val onBadPassport: (peer: String, fault: PassportFault) -> Unit = { _, _ -> },
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val store = SecretStore(dir, vault)
@@ -121,7 +124,7 @@ internal class SecretChats(
             // a first message that waited on the server longer than its certificate lived is not an attack:
             // it is undecryptable and comes back through recovery with a fresh passport
             if (incoming && e.fault == PassportFault.EXPIRED) throw E2eeException(E2eeFailure.UNDECRYPTABLE, e)
-            onBadPassport(e.fault)
+            onBadPassport(user, e.fault)
             throw E2eeException(E2eeFailure.BAD_PASSPORT, e)
         }
         if (known != null && !known.contentEquals(identityKey)) {
@@ -232,13 +235,32 @@ internal class SecretChats(
         )
     }
 
-    /** Replaces the signed and post-quantum prekeys; the replaced ones decrypt for 30 more days (FR-007). */
-    suspend fun rotateSignedKeys(): Unit = mutex.withLock {
+    /**
+     * Replaces the signed and post-quantum prekeys when the current ones are older than [olderThanMs];
+     * the replaced ones decrypt for 30 more days (FR-007). Returns whether they were replaced — the
+     * caller then publishes [ownKeys].
+     */
+    suspend fun rotateSignedKeys(olderThanMs: Long = 0): Boolean = mutex.withLock {
         val account = store.account()
+        val current = account.signed[account.currentSignedId] ?: return@withLock false // nothing published yet
+        if (now() - SignedPreKeyRecord(current.record).timestamp < olderThanMs) return@withLock false
         newSignedKeys(account)
         dropExpired(account)
         store.save(account)
+        true
     }
+
+    /**
+     * This installation's `deviceId` in the key directory. It changes with the identity key: the
+     * directory never takes a one-time key id twice for one device, and a new account counts them from 1.
+     */
+    suspend fun directoryId(): String = mutex.withLock {
+        val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(store.account().nameKey, "HmacSHA256")) }
+        mac.doFinal("key-directory device".toByteArray()).take(16).joinToString("") { "%02x".format(it) }
+    }
+
+    /** Own identity key, public half (33 bytes): what the directory must hold for this account. */
+    suspend fun identityKey(): ByteArray = mutex.withLock { store.account().identity.publicKey.serialize() }
 
     private fun newSignedKeys(account: Account) {
         val at = now()
