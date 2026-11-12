@@ -44,10 +44,29 @@ internal class Account(
     var dirty = false
 }
 
+/** How far the peer's remembered key is trusted (FR-014, FR-015). */
+internal enum class PeerTrust {
+    /** No key accepted yet. */
+    UNVERIFIED,
+
+    /** The key came with a passport that passed the checks. */
+    PASSPORT,
+
+    /** The user compared the safety number. */
+    VERIFIED,
+
+    /** Was [VERIFIED], then the key changed: encryption is refused until the user verifies again or drops the mark. */
+    REVERIFY,
+}
+
 /** Everything about one peer: one file. */
 internal class Peer(val file: File) {
-    /** The peer's identity key as last seen (33 bytes), or null. */
+    /** The peer's identity key that was accepted last (33 bytes), or null. */
     var identity: ByteArray? = null
+    var trust = PeerTrust.UNVERIFIED
+
+    /** The key was replaced by another one; stays until the web app reads the peer's state. */
+    var changed = false
 
     /** libsignal session record: the current session and the earlier ones it still decrypts with. */
     var session: ByteArray? = null
@@ -89,8 +108,12 @@ internal class SecretStore(private val dir: File, private val vault: Vault, priv
             val d = DataInputStream(ByteArrayInputStream(open(peer.file)))
             if (d.readByte() != FORMAT) throw Unreadable()
             val identity = d.readBlob()
+            val trust = PeerTrust.entries[d.readUnsignedByte()]
+            val changed = d.readBoolean()
             peer.session = d.readBlob()
             peer.identity = identity
+            peer.trust = trust
+            peer.changed = changed
         } catch (e: E2eeException) {
             throw e
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -101,6 +124,8 @@ internal class SecretStore(private val dir: File, private val vault: Vault, priv
             peer.file.delete()
             peer.identity = null
             peer.session = null
+            peer.trust = PeerTrust.UNVERIFIED
+            peer.changed = false
         }
         return peer
     }
@@ -135,6 +160,8 @@ internal class SecretStore(private val dir: File, private val vault: Vault, priv
         DataOutputStream(out).apply {
             writeByte(FORMAT.toInt())
             writeBlob(peer.identity)
+            writeByte(peer.trust.ordinal)
+            writeBoolean(peer.changed)
             writeBlob(peer.session)
         }
         seal(peer.file, out.toByteArray())

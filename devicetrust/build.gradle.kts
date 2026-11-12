@@ -176,6 +176,8 @@ dependencies {
     // real org.json for JVM tests (android.jar has only stubs)
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)
+    // test certificate authority for passports: device certificates with URI names (specs/002, story 2)
+    testImplementation(libs.bcpkix)
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.okhttp.tls)
 

@@ -15,6 +15,8 @@ internal class PeerKeys(
     val pqPreKey: SignedKey,
     /** null when the peer ran out of one-time keys and has no last-resort one: the session is still built. */
     val oneTimePreKey: OneTimeKey?,
+    /** null when the record was published without one (a browser, an older app). */
+    val passport: Passport? = null,
 )
 
 /** What this device publishes: public halves only. */

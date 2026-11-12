@@ -13,6 +13,7 @@ import org.signal.libsignal.protocol.SessionCipher
 import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.ecc.ECKeyPair
 import org.signal.libsignal.protocol.ecc.ECPublicKey
+import org.signal.libsignal.protocol.fingerprint.NumericFingerprintGenerator
 import org.signal.libsignal.protocol.groups.state.SenderKeyRecord
 import org.signal.libsignal.protocol.kem.KEMKeyPair
 import org.signal.libsignal.protocol.kem.KEMKeyType
@@ -42,8 +43,10 @@ import java.util.UUID
  * Every operation runs alone (FR-008), reads the state from disk, and writes it back only when it
  * succeeded — a refused or interrupted operation leaves the state as it was (FR-004, FR-005).
  *
- * Not here yet: the passport (story 2 — until then a peer's key is taken as the directory or the
- * peer's first message gives it), the HTTP client of the key directory (story 3), the bridge (story 4).
+ * A peer's key is accepted only with a passport that passes [PassportCheck] (story 2); once
+ * accepted it is remembered and the passport is not asked for again until the key changes.
+ *
+ * Not here yet: the HTTP client of the key directory (story 3), the bridge (story 4).
  */
 internal class SecretChats(
     /** Own account id: the libsignal address name. A user has exactly one device, so the device id is always 1. */
@@ -51,6 +54,11 @@ internal class SecretChats(
     dir: File,
     vault: Vault,
     private val directory: KeyDirectory,
+    private val passports: PassportCheck,
+    /** This device's passport for its identity key; throws [E2eeException] `NOT_ENROLLED` without a device certificate. */
+    private val ownPassport: suspend (identityKey: ByteArray) -> Passport,
+    /** A passport that failed a check: goes to the gateway through the alert channel (FR-017). */
+    private val onBadPassport: (PassportFault) -> Unit = {},
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val store = SecretStore(dir, vault)
@@ -72,8 +80,14 @@ internal class SecretChats(
         val state = store.peer(account, peer)
         val signal = SignalStore(account, state, SignalProtocolAddress(peer, DEVICE))
         val at = Instant.ofEpochMilli(now())
+        if (state.trust == PeerTrust.REVERIFY) throw E2eeException(E2eeFailure.REVERIFY)
         if (!signal.hasUsableSession(at)) {
             if (fresh == null) return@withLock null
+            accept(state, peer, fresh.identityKey, fresh.passport)
+            if (state.trust == PeerTrust.REVERIFY) {
+                store.save(state) // the change must be seen by the web app, the message is not sent
+                throw E2eeException(E2eeFailure.REVERIFY)
+            }
             try {
                 // trap: the builder takes (store, remote, local), the cipher (store, local, remote)
                 SessionBuilder(signal, signal.remote, self).process(bundle(fresh), at)
@@ -86,8 +100,37 @@ internal class SecretChats(
         } catch (e: Exception) {
             throw E2eeException(E2eeFailure.UNDECRYPTABLE, e)
         }
+        // FR-013: until the peer answers, every message carries the passport — the peer checks it without the directory
+        val passport = if (message.type == CiphertextMessage.PREKEY_TYPE) "." + B64.encodeToString(ownPassport(account.identity.publicKey.serialize()).encode()) else ""
         commit(account, state)
-        ENVELOPE + message.type + "." + Base64.getUrlEncoder().withoutPadding().encodeToString(message.serialize())
+        ENVELOPE + message.type + "." + B64.encodeToString(message.serialize()) + passport
+    }
+
+    /**
+     * Decides whether [identityKey] is [user]'s key (FR-012 – FR-015). A key accepted before is not
+     * checked again; a new one needs a passport. Marks a change; a peer verified by safety number
+     * goes to `REVERIFY`.
+     */
+    private fun accept(peer: Peer, user: String, identityKey: ByteArray, passport: Passport?, incoming: Boolean = false) {
+        val known = peer.identity
+        if (known != null && known.contentEquals(identityKey) && peer.trust != PeerTrust.UNVERIFIED) return
+        if (passport == null) throw E2eeException(E2eeFailure.NO_PASSPORT)
+        try {
+            passports.verify(user, identityKey, passport)
+        } catch (e: PassportRejected) {
+            // a first message that waited on the server longer than its certificate lived is not an attack:
+            // it is undecryptable and comes back through recovery with a fresh passport
+            if (incoming && e.fault == PassportFault.EXPIRED) throw E2eeException(E2eeFailure.UNDECRYPTABLE, e)
+            onBadPassport(e.fault)
+            throw E2eeException(E2eeFailure.BAD_PASSPORT, e)
+        }
+        if (known != null && !known.contentEquals(identityKey)) {
+            peer.changed = true
+            if (peer.trust == PeerTrust.VERIFIED) peer.trust = PeerTrust.REVERIFY
+        }
+        if (peer.trust == PeerTrust.UNVERIFIED) peer.trust = PeerTrust.PASSPORT
+        peer.identity = identityKey
+        peer.dirty = true
     }
 
     /** Decrypts an envelope made by the peer's [encrypt]. A second decryption of the same envelope is `DUPLICATE`. */
@@ -101,10 +144,17 @@ internal class SecretChats(
             val bytes = Base64.getUrlDecoder().decode(parts[1])
             val cipher = SessionCipher(signal, self, signal.remote)
             when (parts[0].toInt()) {
-                CiphertextMessage.PREKEY_TYPE -> cipher.decrypt(PreKeySignalMessage(bytes))
+                CiphertextMessage.PREKEY_TYPE -> {
+                    val message = PreKeySignalMessage(bytes)
+                    val passport = parts.getOrNull(2)?.let { Passport.decode(Base64.getUrlDecoder().decode(it)) }
+                    accept(state, peer, message.identityKey.serialize(), passport, incoming = true)
+                    cipher.decrypt(message)
+                }
                 CiphertextMessage.WHISPER_TYPE -> cipher.decrypt(SignalMessage(bytes))
                 else -> throw IllegalArgumentException("unknown message type")
             }
+        } catch (e: E2eeException) {
+            throw e // no_passport, bad_passport, undecryptable (expired passport)
         } catch (e: DuplicateMessageException) {
             throw E2eeException(E2eeFailure.DUPLICATE, e)
         } catch (e: Exception) {
@@ -125,6 +175,34 @@ internal class SecretChats(
         val record = state.session?.let(::SessionRecord) ?: return@withLock
         record.archiveCurrentState()
         state.session = record.serialize()
+        store.save(state)
+    }
+
+    /** The peer's state for the web app; reading it takes the "key changed" mark off (FR-014). */
+    suspend fun peerState(peer: String): Pair<PeerTrust, Boolean> = mutex.withLock {
+        val state = store.peer(store.account(), peer)
+        val changed = state.changed
+        if (changed) {
+            state.changed = false
+            store.save(state)
+        }
+        state.trust to changed
+    }
+
+    /** 60 digits to compare with the peer (FR-016), or null while no key of the peer is accepted. */
+    suspend fun safetyNumber(peer: String): String? = mutex.withLock {
+        val account = store.account()
+        val theirs = store.peer(account, peer).identity ?: return@withLock null
+        NumericFingerprintGenerator(5200)
+            .createFor(2, me.toByteArray(), account.identity.publicKey, peer.toByteArray(), IdentityKey(theirs))
+            .displayableFingerprint.displayText
+    }
+
+    /** The user compared the safety number ([verified]) or drops the mark; both end `REVERIFY`. */
+    suspend fun setVerified(peer: String, verified: Boolean): Unit = mutex.withLock {
+        val state = store.peer(store.account(), peer)
+        if (state.identity == null || state.trust == PeerTrust.UNVERIFIED) return@withLock
+        state.trust = if (verified) PeerTrust.VERIFIED else PeerTrust.PASSPORT
         store.save(state)
     }
 
@@ -216,8 +294,9 @@ internal class SecretChats(
             return if (before == null) IdentityKeyStore.IdentityChange.NEW_OR_UNCHANGED else IdentityKeyStore.IdentityChange.REPLACED_EXISTING
         }
 
-        // story 2 puts the passport check and the `reverify` refusal here; until then a changed key is taken
-        override fun isTrustedIdentity(address: SignalProtocolAddress, identityKey: IdentityKey, direction: IdentityKeyStore.Direction): Boolean = true
+        /** Only the key [accept] let through: libsignal never takes a peer's key on its own. */
+        override fun isTrustedIdentity(address: SignalProtocolAddress, identityKey: IdentityKey, direction: IdentityKeyStore.Direction): Boolean =
+            address == remote && peer.trust != PeerTrust.UNVERIFIED && peer.identity?.contentEquals(identityKey.serialize()) == true
 
         override fun getIdentity(address: SignalProtocolAddress): IdentityKey? = peer.identity?.takeIf { address == remote }?.let(::IdentityKey)
 
@@ -301,6 +380,7 @@ internal class SecretChats(
     internal companion object {
         /** FR-031. The older `E2EE1:` envelope of the web app is not read. */
         const val ENVELOPE = "E2EE2:"
+        private val B64 = Base64.getUrlEncoder().withoutPadding()
         private const val DEVICE = 1
         private const val KEEP_REPLACED_MS = 30L * 24 * 60 * 60 * 1000
     }
