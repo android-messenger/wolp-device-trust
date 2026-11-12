@@ -15,12 +15,17 @@ import org.wolpmessenger.devicetrust.api.VaultPurpose
 import org.wolpmessenger.devicetrust.e2ee.KeyDirectory
 import org.wolpmessenger.devicetrust.e2ee.OneTimeKey
 import org.wolpmessenger.devicetrust.e2ee.OwnKeys
+import org.wolpmessenger.devicetrust.e2ee.Passport
+import org.wolpmessenger.devicetrust.e2ee.PassportCheck
+import org.wolpmessenger.devicetrust.e2ee.PassportFault
 import org.wolpmessenger.devicetrust.e2ee.PeerKeys
+import org.wolpmessenger.devicetrust.e2ee.PeerTrust
 import org.wolpmessenger.devicetrust.e2ee.SecretChats
 import org.wolpmessenger.devicetrust.e2ee.SignedKey
 import org.wolpmessenger.devicetrust.vault.EnvelopeVault
 import org.wolpmessenger.devicetrust.vault.UnlockState
 import java.io.File
+import java.time.Instant
 
 /** specs/002, story 1: two libraries in one process and a stand-in key directory. */
 class SecretChatsTest {
@@ -33,12 +38,16 @@ class SecretChatsTest {
     /** Stand-in key directory: one record per user, a one-time key is handed out once. */
     private inner class Directory : KeyDirectory {
         val records = HashMap<String, OwnKeys>()
+        val passports = HashMap<String, Passport?>()
         val oneTime = HashMap<String, ArrayDeque<OneTimeKey>>()
         var online = true
         var fetches = 0
 
-        fun publish(user: String, keys: OwnKeys) {
+        fun publish(user: String, keys: OwnKeys, passport: Passport?) {
+            // a new device replaces the record: the one-time keys of the old one go with it
+            if (records[user]?.identityKey?.contentEquals(keys.identityKey) == false) oneTime.remove(user)
             records[user] = keys
+            passports[user] = passport
             oneTime.getOrPut(user) { ArrayDeque() }.addAll(keys.oneTimePreKeys)
         }
 
@@ -46,7 +55,7 @@ class SecretChatsTest {
             fetches++
             if (!online) throw E2eeException(E2eeFailure.NO_NETWORK)
             val r = records[user] ?: throw E2eeException(E2eeFailure.NO_DEVICE)
-            return PeerKeys(r.identityKey, r.registrationId, r.signedPreKey, r.pqPreKey, oneTime[user]?.removeFirstOrNull())
+            return PeerKeys(r.identityKey, r.registrationId, r.signedPreKey, r.pqPreKey, oneTime[user]?.removeFirstOrNull(), passports[user])
         }
     }
 
@@ -57,18 +66,28 @@ class SecretChatsTest {
         val vault = EnvelopeVault(kek, File(dir, "dek.bin"), UnlockState { unlocked })
         val files = File(dir, "e2ee")
 
+        val deviceKey = TestCa.ecKey()
+        var chain = listOf(ca.device(user, key = deviceKey), ca.issuer)
+        val badPassports = ArrayList<PassportFault>()
+
+        fun passport(identityKey: ByteArray) = Passport.sign(deviceKey.private, user, "01JCZ8K3W9D5V7H2Q4N6M8P0RT", identityKey, chain)
+
         /** A new process over the same files. */
-        fun start() = SecretChats(user, files, vault, directory) { clock }
+        fun start(v: EnvelopeVault = vault) =
+            SecretChats(user, files, v, directory, PassportCheck(ca.trust) { Instant.ofEpochMilli(clock) }, ::passport, { badPassports += it }) { clock }
         var chats = start()
 
         suspend fun enroll(oneTime: Int = 5): Phone {
             vault.provision()
-            directory.publish(user, chats.ownKeys(oneTime))
+            publish(chats.ownKeys(oneTime))
             return this
         }
+
+        fun publish(keys: OwnKeys) = directory.publish(user, keys, passport(keys.identityKey))
     }
 
     private val directory = Directory()
+    private val ca = TestCa()
 
     private suspend fun pair(): Pair<Phone, Phone> = Phone("alice", directory).enroll() to Phone("bob", directory).enroll()
 
@@ -123,7 +142,8 @@ class SecretChatsTest {
     fun `3 - garbage and a damaged message are undecryptable and change nothing`() = runTest {
         val (alice, bob) = pair()
         val good = alice.chats.encrypt("bob", "one")
-        for (bad in listOf("", "E2EE1:abc", "E2EE2:", "E2EE2:9.AAAA", "E2EE2:3.***", good.dropLast(4) + "AAAA")) {
+        val (type, message, passport) = good.split('.')
+        for (bad in listOf("", "E2EE1:abc", "E2EE2:", "E2EE2:9.AAAA", "E2EE2:3.***", "$type.${message.dropLast(4)}AAAA.$passport", "$type.$message.AAAA")) {
             refused(E2eeFailure.UNDECRYPTABLE) { bob.chats.decrypt("alice", bad) }
         }
         assertEquals("one", bob.chats.decrypt("alice", good))
@@ -150,7 +170,7 @@ class SecretChatsTest {
 
         // a new process behind the lock screen: the vault key is not in memory
         bob.unlocked = false
-        val locked = SecretChats("bob", bob.files, EnvelopeVault(bob.kek, File(bob.dir, "dek.bin"), UnlockState { bob.unlocked }), directory) { clock }
+        val locked = bob.start(EnvelopeVault(bob.kek, File(bob.dir, "dek.bin"), UnlockState { bob.unlocked }))
         val before = bob.files.listFiles()!!.associate { it.name to it.readBytes().toList() }
         refused(E2eeFailure.LOCKED) { locked.decrypt("alice", waiting) }
         refused(E2eeFailure.LOCKED) { locked.encrypt("alice", "x") }
@@ -354,8 +374,10 @@ class SecretChatsTest {
         assertEquals(33, v1.identityKey.size)
         assertTrue(v1.registrationId in 1..16380)
 
-        // Alice builds two sessions' worth of first messages on the keys published first
-        directory.publish("bob", v1)
+        // Bob knows Alice; she then builds two more sessions on the keys published first
+        bob.publish(v1)
+        assertEquals("hello", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "hello")))
+        alice.chats.resetSession("bob")
         val early = alice.chats.encrypt("bob", "within 30 days")
         alice.chats.resetSession("bob")
         val late = alice.chats.encrypt("bob", "after 30 days")
@@ -371,5 +393,156 @@ class SecretChatsTest {
         clock += 2 * day
         bob.chats.ownKeys(0) // any publication drops what expired
         refused(E2eeFailure.UNDECRYPTABLE) { bob.chats.decrypt("alice", late) }
+    }
+
+    // ---------------------------------------------------------------- story 2: the passport
+
+    @Test
+    fun `s2 1 - a key with a good passport is accepted and remembered`() = runTest {
+        val (alice, bob) = pair()
+        assertEquals(PeerTrust.UNVERIFIED to false, alice.chats.peerState("bob"))
+        assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
+        assertEquals(PeerTrust.PASSPORT to false, alice.chats.peerState("bob"))
+        assertEquals("the receiver checked the passport from the message, not from the directory", 1, directory.fetches)
+        assertEquals(PeerTrust.PASSPORT to false, bob.chats.peerState("alice"))
+        assertTrue(alice.badPassports.isEmpty() && bob.badPassports.isEmpty())
+    }
+
+    @Test
+    fun `s2 2 - no passport - the peer is not in the app`() = runTest {
+        val (alice, bob) = pair()
+        val first = alice.chats.encrypt("bob", "one")
+        refused(E2eeFailure.NO_PASSPORT) { bob.chats.decrypt("alice", first.substringBeforeLast('.')) }
+        assertEquals(PeerTrust.UNVERIFIED to false, bob.chats.peerState("alice"))
+
+        directory.passports["alice"] = null
+        refused(E2eeFailure.NO_PASSPORT) { bob.chats.encrypt("alice", "x") }
+        assertTrue("no passport is not an attack", bob.badPassports.isEmpty())
+    }
+
+    @Test
+    fun `s2 3-7 - a passport that fails a check - refusal, alert, nothing encrypted`() = runTest {
+        val (alice, bob) = pair()
+        val mallory = Phone("mallory", directory).enroll()
+        val bobKeys = directory.records.getValue("bob")
+        val other = TestCa("other")
+        val cases = mapOf(
+            // 3: not our authority; our root but an issuer outside the list; not a device certificate
+            PassportFault.CHAIN to Passport.sign(bob.deviceKey.private, "bob", DEVICE, bobKeys.identityKey, listOf(other.device("bob", key = bob.deviceKey), other.issuer)),
+            PassportFault.NOT_DEVICE to Passport.sign(bob.deviceKey.private, "bob", DEVICE, bobKeys.identityKey, listOf(ca.device("bob", key = bob.deviceKey, clientAuth = false), ca.issuer)),
+            // 4: a real certificate of another account
+            PassportFault.USER to mallory.passport(bobKeys.identityKey),
+            // 5: expired more than 7 days ago
+            PassportFault.EXPIRED to Passport.sign(bob.deviceKey.private, "bob", DEVICE, bobKeys.identityKey, listOf(ca.device("bob", key = bob.deviceKey, notBefore = Instant.ofEpochMilli(clock - 9 * day), notAfter = Instant.ofEpochMilli(clock - 8 * day)), ca.issuer)),
+            // 6: Bob's real certificate, but the key under it is not the one he signed
+            PassportFault.SIGNATURE to Passport(bob.passport(directory.records.getValue("mallory").identityKey).signature, bob.chain.map { it.encoded }),
+        )
+        for ((fault, passport) in cases) {
+            directory.passports["bob"] = passport
+            refused(E2eeFailure.BAD_PASSPORT) { alice.chats.encrypt("bob", "secret") }
+            assertEquals(fault, alice.badPassports.removeLast())
+            assertEquals(PeerTrust.UNVERIFIED to false, alice.chats.peerState("bob"))
+        }
+        assertTrue(alice.badPassports.isEmpty())
+        assertEquals("no session was built", listOf("account.bin"), alice.files.listFiles()!!.map { it.name })
+
+        // the same from the other side: a first message with a foreign passport
+        directory.passports["bob"] = bob.passport(bobKeys.identityKey)
+        val first = alice.chats.encrypt("bob", "one")
+        val forged = first.substringBeforeLast('.') + "." + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(mallory.passport(directory.records.getValue("alice").identityKey).encode())
+        refused(E2eeFailure.BAD_PASSPORT) { bob.chats.decrypt("alice", forged) }
+        assertEquals(listOf(PassportFault.USER), bob.badPassports)
+        assertEquals("one", bob.chats.decrypt("alice", first))
+    }
+
+    @Test
+    fun `s2 5 - a certificate expired less than 7 days ago is accepted`() = runTest {
+        val (alice, bob) = pair()
+        bob.chain = listOf(ca.device("bob", key = bob.deviceKey, notBefore = Instant.ofEpochMilli(clock - 7 * day), notAfter = Instant.ofEpochMilli(clock - 6 * day)), ca.issuer)
+        directory.passports["bob"] = bob.passport(directory.records.getValue("bob").identityKey)
+        assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
+    }
+
+    @Test
+    fun `s2 - a first message older than its certificate is undecryptable, not an attack`() = runTest {
+        val (alice, bob) = pair()
+        val first = alice.chats.encrypt("bob", "one")
+        clock += 9 * day
+        refused(E2eeFailure.UNDECRYPTABLE) { bob.chats.decrypt("alice", first) }
+        assertTrue(bob.badPassports.isEmpty())
+    }
+
+    @Test
+    fun `s2 8 - new key of a peer not verified by code - accepted, the change is shown once`() = runTest {
+        val (alice, bob) = pair()
+        assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
+
+        val newAlice = Phone("alice", directory).enroll()
+        assertEquals("from the new phone", bob.chats.decrypt("alice", newAlice.chats.encrypt("bob", "from the new phone")))
+        assertEquals(PeerTrust.PASSPORT to true, bob.chats.peerState("alice"))
+        assertEquals("read once", PeerTrust.PASSPORT to false, bob.chats.peerState("alice"))
+        assertEquals("sending goes on", "answer", newAlice.chats.decrypt("bob", bob.chats.encrypt("alice", "answer")))
+    }
+
+    @Test
+    fun `s2 9 - new key of a peer verified by code - encryption stops until verified again`() = runTest {
+        val (alice, bob) = pair()
+        assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
+        bob.chats.setVerified("alice", true)
+        assertEquals(PeerTrust.VERIFIED to false, bob.chats.peerState("alice"))
+        assertEquals("two", alice.chats.decrypt("bob", bob.chats.encrypt("alice", "two")))
+
+        val newAlice = Phone("alice", directory).enroll()
+        assertEquals("incoming is still read", "hi", bob.chats.decrypt("alice", newAlice.chats.encrypt("bob", "hi")))
+        assertEquals(PeerTrust.REVERIFY to true, bob.chats.peerState("alice"))
+        refused(E2eeFailure.REVERIFY) { bob.chats.encrypt("alice", "x") }
+        bob.chats = bob.start()
+        refused(E2eeFailure.REVERIFY) { bob.chats.encrypt("alice", "x") }
+
+        bob.chats.setVerified("alice", true)
+        assertEquals(PeerTrust.VERIFIED to false, bob.chats.peerState("alice"))
+        assertEquals("three", newAlice.chats.decrypt("bob", bob.chats.encrypt("alice", "three")))
+    }
+
+    @Test
+    fun `s2 9 - the new key comes from the directory - refused, then the mark is dropped`() = runTest {
+        val (alice, bob) = pair()
+        assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
+        bob.chats.setVerified("alice", true)
+
+        val newAlice = Phone("alice", directory).enroll()
+        bob.chats.resetSession("alice") // Alice's new phone asked to resend
+        refused(E2eeFailure.REVERIFY) { bob.chats.encrypt("alice", "x") }
+        assertEquals(PeerTrust.REVERIFY to true, bob.chats.peerState("alice"))
+
+        bob.chats.setVerified("alice", false)
+        assertEquals(PeerTrust.PASSPORT to false, bob.chats.peerState("alice"))
+        assertEquals("again", newAlice.chats.decrypt("bob", bob.chats.encrypt("alice", "again")))
+    }
+
+    @Test
+    fun `s2 10 - the safety number is the same on both phones and changes with the key`() = runTest {
+        val (alice, bob) = pair()
+        assertEquals(null, alice.chats.safetyNumber("bob"))
+        assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
+        val number = alice.chats.safetyNumber("bob")!!
+        assertTrue(number.length == 60 && number.all { it.isDigit() })
+        assertEquals(number, bob.chats.safetyNumber("alice"))
+
+        val newAlice = Phone("alice", directory).enroll()
+        assertEquals("hi", bob.chats.decrypt("alice", newAlice.chats.encrypt("bob", "hi")))
+        assertNotEquals(number, bob.chats.safetyNumber("alice"))
+        assertEquals(bob.chats.safetyNumber("alice"), newAlice.chats.safetyNumber("bob"))
+    }
+
+    @Test
+    fun `s2 - a mark on a peer whose key is not accepted does nothing`() = runTest {
+        val (alice, _) = pair()
+        alice.chats.setVerified("bob", true)
+        assertEquals(PeerTrust.UNVERIFIED to false, alice.chats.peerState("bob"))
+    }
+
+    private companion object {
+        const val DEVICE = "01JCZ8K3W9D5V7H2Q4N6M8P0RT"
     }
 }
