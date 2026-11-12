@@ -162,6 +162,9 @@ dependencies {
     implementation(libs.lifecycle.process) // RASP on coming to the foreground (S2 §7.2)
 
     testImplementation(libs.junit)
+    // specs/002: tests only for now, so APKs do not grow before the protocol code exists. Moving it to
+    // `implementation` needs three settings in every app module — see "Что проверено до кода" in the spec
+    testImplementation(libs.libsignal.android)
     // real org.json for JVM tests (android.jar has only stubs)
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)
