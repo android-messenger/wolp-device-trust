@@ -157,7 +157,7 @@ class WolpApp : Application() {
 | `okHttpClient(): OkHttpClient` | для всех запросов к шлюзу, кроме обновлений | см. [раздел 8](#8-сеть-и-webview) |
 | `updateHttpClient(): OkHttpClient` | только для загрузки обновлений | см. [раздел 8](#8-сеть-и-webview) |
 | `vault: Vault` | шифрование секретов | см. [раздел 9](#9-vault) |
-| `e2ee: E2ee` | секретные чаты: шесть операций для моста | см. [раздел 14](#14-секретные-чаты). Без `e2eeRoots` и `e2eeIssuers` — `IllegalStateException` |
+| `e2ee: E2ee` | секретные чаты: восемь операций для моста | см. [раздел 14](#14-секретные-чаты). Без `e2eeRoots` и `e2eeIssuers` — `IllegalStateException` |
 | `deviceInfo(): DeviceSecurityInfo?` | диагностика | сведения последнего вызова `precheck()`, завершившегося `Supported` или `Unsupported`; до первого такого вызова — `null` |
 
 ### Результат `precheck`
@@ -340,7 +340,7 @@ val text = DeviceTrust.e2ee.decrypt(peer, envelope)
 |---|---|
 | `suspend encrypt(peer, text): String` | шифрует; первое сообщение собеседнику берёт его ключи в службе ключей и проверяет паспорт |
 | `suspend decrypt(peer, envelope): String` | расшифровывает; то же сообщение второй раз — отказ `duplicate` |
-| `suspend peerState(peer): E2eePeerState` | состояние собеседника (`unverified`, `passport`, `verified`, `reverify`) и признак «ключ сменился». Чтение снимает признак |
+| `suspend peerState(peer): E2eePeerState` | состояние собеседника (`unverified`, `passport`, `verified`, `reverify`) и признак «ключ сменился». Чтение признак не снимает: он держится, пока не вызвана `keyChangeSeen` или `setVerified`, и переживает перезапуск приложения |
 | `suspend safetyNumber(peer): String?` | 60 цифр для сверки; `null`, пока ключ собеседника не принят |
 | `suspend setVerified(peer, verified, safetyNumber)` | пользователь сверил код или снял отметку. `safetyNumber` — код, который был на экране: если ключ собеседника с тех пор сменился, отметка не ставится, отказ `reverify` |
 | `suspend keyChangeSeen(peer)` | пользователь увидел сообщение о смене ключа и закрыл его — признак «ключ сменился» снимается |
