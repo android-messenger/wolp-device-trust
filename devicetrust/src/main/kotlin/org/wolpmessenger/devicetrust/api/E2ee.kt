@@ -54,11 +54,11 @@ public enum class E2eePeerTrust(public val code: String) {
     REVERIFY("reverify"),
 }
 
-/** [keyChanged] is true once after the peer's key was replaced: reading the state takes the mark off. */
+/** [keyChanged] is true after the peer's key was replaced, until [E2ee.keyChangeSeen] or [E2ee.setVerified]. */
 public class E2eePeerState(public val trust: E2eePeerTrust, public val keyChanged: Boolean)
 
 /**
- * Secret chats (specs/002): the seven operations the app's bridge hands to the web app. [peer] is the
+ * Secret chats (specs/002): the eight operations the app's bridge hands to the web app. [peer] is the
  * peer's account id. No operation returns a key or signs the caller's data; every refusal is an
  * [E2eeException] with a reason from the closed list [E2eeFailure]. All of them are main-safe.
  *
@@ -77,8 +77,15 @@ public interface E2ee {
     /** 60 digits to compare with the peer, or null while no key of the peer is accepted. */
     public suspend fun safetyNumber(peer: String): String?
 
-    /** The user compared the safety number ([verified]) or drops the mark. */
-    public suspend fun setVerified(peer: String, verified: Boolean)
+    /**
+     * The user compared the safety number ([verified]) or drops the mark. [safetyNumber] is the number
+     * that was on the screen: when the peer's key is no longer the one it was made from, the mark is
+     * not set and the refusal is `reverify`. Not looked at when the mark is dropped.
+     */
+    public suspend fun setVerified(peer: String, verified: Boolean, safetyNumber: String?)
+
+    /** The user was shown that the peer's key changed and closed the notice: takes the mark off. */
+    public suspend fun keyChangeSeen(peer: String)
 
     /**
      * Message recovery: the next [encrypt] takes the peer's keys from the directory and builds a new

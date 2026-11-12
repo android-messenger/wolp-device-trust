@@ -18,6 +18,7 @@ import org.wolpmessenger.devicetrust.keys.KeystoreKeys
 import org.wolpmessenger.devicetrust.store.TrustStore
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.time.Instant
@@ -58,9 +59,11 @@ internal class E2eeService<D>(
     @Volatile
     private var syncedAt: Pair<String, Long>? = null // certificate serial to monotonic time of the last good pass
 
-    /** Set by [wipe]: the session that was signed out of (or [NO_SESSION]). No publication while it lasts. */
-    @Volatile
-    private var signedOut: String? = null
+    /**
+     * Written by [wipe]: a digest of the session that was signed out of (or [NO_SESSION]). No
+     * publication while it lasts. A file beside the key files: the ban has to outlive the process.
+     */
+    private val signedOut = File(dir.path + ".signed-out")
 
     override suspend fun encrypt(peer: String, text: String): String = io { chats.encrypt(peer, text) }
 
@@ -73,12 +76,15 @@ internal class E2eeService<D>(
 
     override suspend fun safetyNumber(peer: String): String? = io { chats.safetyNumber(peer) }
 
-    override suspend fun setVerified(peer: String, verified: Boolean): Unit = io { chats.setVerified(peer, verified) }
+    override suspend fun setVerified(peer: String, verified: Boolean, safetyNumber: String?): Unit = io { chats.setVerified(peer, verified, safetyNumber) }
+
+    override suspend fun keyChangeSeen(peer: String): Unit = io { chats.keyChangeSeen(peer) }
 
     override suspend fun resetSession(peer: String): Unit = io { chats.resetSession(peer) }
 
     override suspend fun wipe(): Unit = withContext(Dispatchers.IO) {
-        signedOut = cookie() ?: NO_SESSION // first: a pass starting now must not publish the keys back
+        // first: a pass starting now, or the next process, must not publish the keys back
+        runCatching { signedOut.writeText(cookie()?.let(::digest) ?: NO_SESSION) }
         val s = runCatching { current() }.getOrNull()
         if (s != null) {
             // peers get "no device" instead of encrypting to a key that is about to be erased
@@ -103,10 +109,11 @@ internal class E2eeService<D>(
     suspend fun sync(): Boolean = try {
         io {
             val serial = store.load().active?.serialHex ?: throw E2eeException(E2eeFailure.NOT_ENROLLED)
-            signedOut?.let { out ->
+            if (signedOut.exists()) {
+                val out = runCatching { signedOut.readText() }.getOrDefault(NO_SESSION)
                 val session = cookie()
-                if (session == null || session == out) throw E2eeException(E2eeFailure.NOT_ENROLLED) // nobody is signed in
-                signedOut = null
+                if (session == null || digest(session) == out) throw E2eeException(E2eeFailure.NOT_ENROLLED) // nobody is signed in
+                signedOut.delete()
             }
             sync.sync()
             syncedAt = serial to monotonicMs()
@@ -187,6 +194,10 @@ internal class E2eeService<D>(
         Journal.event("e2ee_foreign_key")
         runCatching { alerts.report(listOf(RaspFinding(FOREIGN_KEY, RaspReaction.REPORT))) }
     }
+
+    /** The session cookie is not kept in a file as it is. */
+    private fun digest(session: String): String =
+        MessageDigest.getInstance("SHA-256").digest(session.toByteArray()).joinToString("") { "%02x".format(it) }
 
     internal companion object {
         /** Check ids of the alerts; the gateway takes any `^[A-Z0-9_]{1,48}$`. */
