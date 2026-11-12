@@ -65,7 +65,7 @@ internal class Peer(val file: File) {
     var identity: ByteArray? = null
     var trust = PeerTrust.UNVERIFIED
 
-    /** The key was replaced by another one; stays until the web app reads the peer's state. */
+    /** The key was replaced by another one; stays until the user closes the notice or compares the number again (FR-014). */
     var changed = false
 
     /** libsignal session record: the current session and the earlier ones it still decrypts with. */
