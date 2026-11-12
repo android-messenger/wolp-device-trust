@@ -178,7 +178,7 @@ public object DeviceTrust {
         // secret chats (specs/002): the key directory is behind the app host, reached with the device certificate
         val e2ee = passportTrust?.let {
             val directory = KeyDirectoryClient({ http.client }, config.appBaseUrl.toHttpUrl(), config.cookieProvider)
-            E2eeService(File(dir, "e2ee"), vault, store, keys, it, directory, alerts, clock::now)
+            E2eeService(File(dir, "e2ee"), vault, store, keys, it, directory, alerts, clock::now, config.cookieProvider)
         }
         vaultImpl = vault
         deviceHttp = http

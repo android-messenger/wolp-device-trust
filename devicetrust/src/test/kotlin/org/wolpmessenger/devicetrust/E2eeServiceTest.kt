@@ -67,9 +67,10 @@ class E2eeServiceTest {
         var vault = EnvelopeVault(kek, File(dir, "dek.bin"), UnlockState { unlocked })
         val reports = Reports()
         var serial = 0
+        var cookie: String? = "session-1"
 
         /** A new process over the same files. */
-        fun start() = E2eeService(File(dir, "dt/e2ee"), vault, store, keystore, ca.trust, directory.of(user), reports, { Instant.ofEpochMilli(clock) }) { uptime }
+        fun start() = E2eeService(File(dir, "dt/e2ee"), vault, store, keystore, ca.trust, directory.of(user), reports, { Instant.ofEpochMilli(clock) }, { cookie }) { uptime }
         var e2ee = start()
 
         /** Enrollment or renewal: a new device key and a certificate for it. */
@@ -288,6 +289,53 @@ class E2eeServiceTest {
         assertFalse(first.keys.identityKey.contentEquals(second.keys.identityKey))
         assertEquals(KeySync.FULL, second.oneTime.size)
         assertTrue("its own earlier record is not somebody else's key", alice.reports.findings.isEmpty())
+    }
+
+    @Test
+    fun `sign-out erases the keys and the directory record, the next sign-in starts with a new key`() = runTest {
+        val alice = Phone("alice", "01ALICE").enroll()
+        val bob = Phone("bob", "01BOB").enroll()
+        assertEquals("one", bob.e2ee.decrypt("alice", alice.e2ee.encrypt("bob", "one")))
+        val before = alice.record.keys.identityKey
+        val files = File(alice.dir, "dt/e2ee")
+        assertTrue(files.listFiles()!!.isNotEmpty())
+
+        alice.e2ee.wipe()
+        assertTrue("no key, no session, no remembered peer, no mark on disk", files.listFiles().isNullOrEmpty())
+        assertNull("peers get 'no device' instead of a key that is gone", directory.records["alice"])
+        refused(E2eeFailure.NO_DEVICE) { bob.e2ee.resetSession("alice"); bob.e2ee.encrypt("alice", "x") }
+
+        // still the session that was signed out of, then nobody: nothing is published back
+        uptime += 2 * hour
+        assertFalse(alice.e2ee.syncIfDue())
+        alice.cookie = null
+        assertFalse(alice.e2ee.sync())
+        assertNull(directory.records["alice"])
+
+        alice.cookie = "session-2"
+        assertTrue(alice.e2ee.syncIfDue())
+        assertFalse("a new identity key", before.contentEquals(alice.record.keys.identityKey))
+        assertTrue("its own sign-out is not somebody else's key", alice.reports.findings.isEmpty())
+        assertEquals("after", alice.e2ee.decrypt("bob", bob.e2ee.encrypt("alice", "after")))
+        assertTrue("bob sees the change once", bob.e2ee.peerState("alice").keyChanged)
+    }
+
+    @Test
+    fun `sign-out does not wait for the screen, the directory or an enrollment`() = runTest {
+        val alice = Phone("alice").enroll()
+        val files = File(alice.dir, "dt/e2ee")
+        alice.unlocked = false
+        alice.vault = EnvelopeVault(alice.kek, File(alice.dir, "dek.bin"), UnlockState { alice.unlocked })
+        alice.e2ee = alice.start()
+        directory.online = false
+        alice.e2ee.wipe()
+        assertTrue(files.listFiles().isNullOrEmpty())
+        assertEquals("unreachable or locked: the record stays, to be replaced after the next sign-in", 1, directory.records.size)
+
+        val nobody = Phone("carol")
+        File(nobody.dir, "dt/e2ee").apply { mkdirs() }.resolve("account.bin").writeBytes(byteArrayOf(1))
+        nobody.e2ee.wipe()
+        assertTrue(File(nobody.dir, "dt/e2ee").listFiles().isNullOrEmpty())
     }
 
     @Test
