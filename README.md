@@ -164,3 +164,7 @@ DeviceTrust.init(this, DeviceTrustConfig(
 | NDK и CMake | `28.2.13676358` и `3.22.1` — для сборки `libwolpdt.so` |
 | Для тестов native-части на сборочной машине | компилятор `cc`, `keytool` из JDK, `apksigner` из Android build-tools |
 | Для тестов на устройстве, замеров и экспорта векторов | `adb` и подключённое устройство с Android 13 или новее |
+
+## Лицензия
+
+AGPL-3.0-or-later, см. [LICENSE](LICENSE).
