@@ -61,6 +61,11 @@ internal class FakeDirectory {
             add(r, keys.oneTimePreKeys)
         }
 
+        override suspend fun remove(deviceId: String) {
+            reach()
+            if (records[user]?.deviceId == deviceId) records.remove(user)
+        }
+
         override suspend fun replenish(deviceId: String, keys: List<OneTimeKey>): Boolean {
             reach()
             val r = records[user]?.takeIf { it.deviceId == deviceId } ?: return false

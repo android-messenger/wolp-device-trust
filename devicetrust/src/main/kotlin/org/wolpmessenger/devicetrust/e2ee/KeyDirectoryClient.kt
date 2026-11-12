@@ -87,6 +87,11 @@ internal class KeyDirectoryClient(
         return true
     }
 
+    override suspend fun remove(deviceId: String) {
+        val (code, _) = call(Request.Builder().url(url("keys", "self", deviceId)).delete())
+        if (code != 204 && code != 404) throw unusable(code)
+    }
+
     // ---------------------------------------------------------------- plumbing
 
     private fun url(vararg segments: String): HttpUrl =

@@ -58,7 +58,7 @@ public enum class E2eePeerTrust(public val code: String) {
 public class E2eePeerState(public val trust: E2eePeerTrust, public val keyChanged: Boolean)
 
 /**
- * Secret chats (specs/002): the six operations the app's bridge hands to the web app. [peer] is the
+ * Secret chats (specs/002): the seven operations the app's bridge hands to the web app. [peer] is the
  * peer's account id. No operation returns a key or signs the caller's data; every refusal is an
  * [E2eeException] with a reason from the closed list [E2eeFailure]. All of them are main-safe.
  *
@@ -85,4 +85,12 @@ public interface E2ee {
      * session; the current one still decrypts. Call on a recovery request, at most once in 10 s per peer.
      */
     public suspend fun resetSession(peer: String)
+
+    /**
+     * Sign-out: erases this installation's keys, sessions, remembered peers and marks, and takes its
+     * record out of the key directory (best effort — call while the session is still valid). Never
+     * refuses and needs no unlocked screen. A new identity key is made and published after the next
+     * sign-in; peers see a key change.
+     */
+    public suspend fun wipe()
 }

@@ -57,6 +57,9 @@ internal interface OwnRecord {
     /** Publishes or replaces the record. The passport goes with every publication: without it the directory erases the earlier one (FR-022). */
     suspend fun publish(deviceId: String, keys: OwnKeys, passport: Passport)
 
+    /** Removes the record of [deviceId]; a record that is not there is not an error. */
+    suspend fun remove(deviceId: String)
+
     /** Adds one-time keys; false when the directory has no such device (publish instead). */
     suspend fun replenish(deviceId: String, keys: List<OneTimeKey>): Boolean
 }

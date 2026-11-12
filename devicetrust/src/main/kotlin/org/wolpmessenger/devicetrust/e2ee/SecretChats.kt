@@ -259,6 +259,9 @@ internal class SecretChats(
         mac.doFinal("key-directory device".toByteArray()).take(16).joinToString("") { "%02x".format(it) }
     }
 
+    /** Sign-out: every file of the secret-chat state is deleted. Needs no Vault, so a locked screen does not hold it up. */
+    suspend fun wipe(): Unit = mutex.withLock { store.wipe() }
+
     /** Own identity key, public half (33 bytes): what the directory must hold for this account. */
     suspend fun identityKey(): ByteArray = mutex.withLock { store.account().identity.publicKey.serialize() }
 

@@ -3,6 +3,7 @@ package org.wolpmessenger.devicetrust.e2ee
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.wolpmessenger.devicetrust.Journal
 import org.wolpmessenger.devicetrust.alert.AlertSink
 import org.wolpmessenger.devicetrust.api.E2ee
@@ -38,6 +39,8 @@ internal class E2eeService<D>(
     private val directory: D,
     private val alerts: AlertSink,
     private val now: () -> Instant,
+    /** The Kratos session cookie: after [wipe] nothing is published until another session appears. */
+    private val cookie: () -> String? = { null },
     /** Monotonic milliseconds, for [syncIfDue]. */
     private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) : E2ee where D : KeyDirectory, D : OwnRecord {
@@ -55,6 +58,10 @@ internal class E2eeService<D>(
     @Volatile
     private var syncedAt: Pair<String, Long>? = null // certificate serial to monotonic time of the last good pass
 
+    /** Set by [wipe]: the session that was signed out of (or [NO_SESSION]). No publication while it lasts. */
+    @Volatile
+    private var signedOut: String? = null
+
     override suspend fun encrypt(peer: String, text: String): String = io { chats.encrypt(peer, text) }
 
     override suspend fun decrypt(peer: String, envelope: String): String = io { chats.decrypt(peer, envelope) }
@@ -70,13 +77,37 @@ internal class E2eeService<D>(
 
     override suspend fun resetSession(peer: String): Unit = io { chats.resetSession(peer) }
 
+    override suspend fun wipe(): Unit = withContext(Dispatchers.IO) {
+        signedOut = cookie() ?: NO_SESSION // first: a pass starting now must not publish the keys back
+        val s = runCatching { current() }.getOrNull()
+        if (s != null) {
+            // peers get "no device" instead of encrypting to a key that is about to be erased
+            try {
+                withTimeout(DIRECTORY_TIMEOUT_MS) { directory.remove(s.chats.directoryId()) }
+            } catch (e: Exception) {
+                Journal.event("e2ee_wipe", "the directory record stays: ${(e as? E2eeException)?.failure?.code ?: e.javaClass.simpleName}")
+            }
+            s.chats.wipe()
+        } else {
+            dir.listFiles()?.forEach { it.delete() } // not enrolled: nothing to remove from the directory
+        }
+        signed = null
+        syncedAt = null
+    }
+
     /**
-     * One pass of [KeySync]; false when it has to be repeated (locked, not enrolled, no network).
+     * One pass of [KeySync]; false when it has to be repeated (locked, not enrolled, no network,
+     * signed out).
      * Never throws: it runs in the background.
      */
     suspend fun sync(): Boolean = try {
         io {
             val serial = store.load().active?.serialHex ?: throw E2eeException(E2eeFailure.NOT_ENROLLED)
+            signedOut?.let { out ->
+                val session = cookie()
+                if (session == null || session == out) throw E2eeException(E2eeFailure.NOT_ENROLLED) // nobody is signed in
+                signedOut = null
+            }
             sync.sync()
             syncedAt = serial to monotonicMs()
         }
@@ -163,6 +194,10 @@ internal class E2eeService<D>(
         const val FOREIGN_KEY = "E2EE_FOREIGN_KEY"
 
         const val SYNC_EVERY_MS = 60L * 60 * 1000
+
+        /** A sign-out must not wait for a slow key directory. */
+        const val DIRECTORY_TIMEOUT_MS = 4_000L
+        private const val NO_SESSION = ""
 
         private const val USER_URN = "urn:wolp:user:"
         private const val DEVICE_URN = "urn:wolp:device:"

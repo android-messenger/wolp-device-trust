@@ -175,6 +175,19 @@ class KeyDirectoryClientTest {
     }
 
     @Test
+    fun `remove deletes the own record and takes a missing one for done`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(204))
+        client.remove("d1")
+        val request = take()
+        assertEquals("DELETE", request.method)
+        assertEquals("/key-directory/v1/keys/self/d1", request.path)
+        server.enqueue(MockResponse().setResponseCode(404))
+        client.remove("d1")
+        server.enqueue(MockResponse().setResponseCode(409))
+        refused(E2eeFailure.NO_NETWORK) { client.remove("d1") }
+    }
+
+    @Test
     fun `without a session the call still goes out and its refusal is no_network`() = runTest {
         cookie = null
         server.enqueue(MockResponse().setResponseCode(401))
