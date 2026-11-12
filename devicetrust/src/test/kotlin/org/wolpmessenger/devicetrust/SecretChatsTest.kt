@@ -473,14 +473,18 @@ class SecretChatsTest {
     }
 
     @Test
-    fun `s2 8 - new key of a peer not verified by code - accepted, the change is shown once`() = runTest {
+    fun `s2 8 - new key of a peer not verified by code - accepted, the change is shown until the user has seen it`() = runTest {
         val (alice, bob) = pair()
         assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
 
         val newAlice = Phone("alice", directory).enroll()
         assertEquals("from the new phone", bob.chats.decrypt("alice", newAlice.chats.encrypt("bob", "from the new phone")))
         assertEquals(PeerTrust.PASSPORT to true, bob.chats.peerState("alice"))
-        assertEquals("read once", PeerTrust.PASSPORT to false, bob.chats.peerState("alice"))
+        assertEquals("reading does not take the mark off", PeerTrust.PASSPORT to true, bob.chats.peerState("alice"))
+        bob.chats = bob.start()
+        assertEquals("nor does a new process", PeerTrust.PASSPORT to true, bob.chats.peerState("alice"))
+        bob.chats.keyChangeSeen("alice")
+        assertEquals(PeerTrust.PASSPORT to false, bob.chats.peerState("alice"))
         assertEquals("sending goes on", "answer", newAlice.chats.decrypt("bob", bob.chats.encrypt("alice", "answer")))
     }
 
@@ -488,7 +492,7 @@ class SecretChatsTest {
     fun `s2 9 - new key of a peer verified by code - encryption stops until verified again`() = runTest {
         val (alice, bob) = pair()
         assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
-        bob.chats.setVerified("alice", true)
+        bob.chats.setVerified("alice", true, bob.chats.safetyNumber("alice"))
         assertEquals(PeerTrust.VERIFIED to false, bob.chats.peerState("alice"))
         assertEquals("two", alice.chats.decrypt("bob", bob.chats.encrypt("alice", "two")))
 
@@ -499,7 +503,7 @@ class SecretChatsTest {
         bob.chats = bob.start()
         refused(E2eeFailure.REVERIFY) { bob.chats.encrypt("alice", "x") }
 
-        bob.chats.setVerified("alice", true)
+        bob.chats.setVerified("alice", true, bob.chats.safetyNumber("alice"))
         assertEquals(PeerTrust.VERIFIED to false, bob.chats.peerState("alice"))
         assertEquals("three", newAlice.chats.decrypt("bob", bob.chats.encrypt("alice", "three")))
     }
@@ -508,14 +512,14 @@ class SecretChatsTest {
     fun `s2 9 - the new key comes from the directory - refused, then the mark is dropped`() = runTest {
         val (alice, bob) = pair()
         assertEquals("one", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "one")))
-        bob.chats.setVerified("alice", true)
+        bob.chats.setVerified("alice", true, bob.chats.safetyNumber("alice"))
 
         val newAlice = Phone("alice", directory).enroll()
         bob.chats.resetSession("alice") // Alice's new phone asked to resend
         refused(E2eeFailure.REVERIFY) { bob.chats.encrypt("alice", "x") }
         assertEquals(PeerTrust.REVERIFY to true, bob.chats.peerState("alice"))
 
-        bob.chats.setVerified("alice", false)
+        bob.chats.setVerified("alice", false, null)
         assertEquals(PeerTrust.PASSPORT to false, bob.chats.peerState("alice"))
         assertEquals("again", newAlice.chats.decrypt("bob", bob.chats.encrypt("alice", "again")))
     }
@@ -538,8 +542,28 @@ class SecretChatsTest {
     @Test
     fun `s2 - a mark on a peer whose key is not accepted does nothing`() = runTest {
         val (alice, _) = pair()
-        alice.chats.setVerified("bob", true)
+        alice.chats.setVerified("bob", true, "0".repeat(60))
         assertEquals(PeerTrust.UNVERIFIED to false, alice.chats.peerState("bob"))
+    }
+
+    // Audit 2026-11-12, finding 3: the dialog shows the number of one key, the key is replaced while it
+    // is open, the tap must not mark the new key.
+    @Test
+    fun `s2 10 - the mark goes to the key whose number was on the screen`() = runTest {
+        val (alice, bob) = pair()
+        assertEquals("hi", bob.chats.decrypt("alice", alice.chats.encrypt("bob", "hi")))
+        val shown = alice.chats.safetyNumber("bob")!!
+
+        val newBob = Phone("bob", directory).enroll()
+        assertEquals("x", alice.chats.decrypt("bob", newBob.chats.encrypt("alice", "x"))) // key replaced meanwhile
+
+        refused(E2eeFailure.REVERIFY) { alice.chats.setVerified("bob", true, shown) }
+        refused(E2eeFailure.REVERIFY) { alice.chats.setVerified("bob", true, null) }
+        assertEquals("not verified, the change is still to be shown", PeerTrust.PASSPORT to true, alice.chats.peerState("bob"))
+
+        val current = alice.chats.safetyNumber("bob")!!
+        alice.chats.setVerified("bob", true, current.chunked(5).joinToString(" ")) // as the screen groups it
+        assertEquals(PeerTrust.VERIFIED to false, alice.chats.peerState("bob"))
     }
 
     private companion object {

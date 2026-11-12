@@ -132,7 +132,7 @@ class E2eeServiceTest {
         assertFalse(alice.e2ee.peerState("bob").keyChanged)
         assertEquals(60, alice.e2ee.safetyNumber("bob")!!.filter(Char::isDigit).length)
         assertEquals(alice.e2ee.safetyNumber("bob"), bob.e2ee.safetyNumber("alice"))
-        alice.e2ee.setVerified("bob", true)
+        alice.e2ee.setVerified("bob", true, alice.e2ee.safetyNumber("bob"))
         assertEquals(E2eePeerTrust.VERIFIED, alice.e2ee.peerState("bob").trust)
 
         alice.e2ee.resetSession("bob")
@@ -312,12 +312,22 @@ class E2eeServiceTest {
         assertFalse(alice.e2ee.sync())
         assertNull(directory.records["alice"])
 
+        // a sign-out without network leaves the session alive: the next process must not publish under it
+        alice.cookie = "session-1"
+        alice.e2ee = alice.start()
+        assertFalse(alice.e2ee.sync())
+        assertNull(directory.records["alice"])
+        assertFalse("the session is not kept in a file as it is", File(alice.dir, "dt").walk().filter { it.isFile }.any { "session-1" in it.readText(Charsets.ISO_8859_1) })
+
         alice.cookie = "session-2"
         assertTrue(alice.e2ee.syncIfDue())
         assertFalse("a new identity key", before.contentEquals(alice.record.keys.identityKey))
         assertTrue("its own sign-out is not somebody else's key", alice.reports.findings.isEmpty())
         assertEquals("after", alice.e2ee.decrypt("bob", bob.e2ee.encrypt("alice", "after")))
-        assertTrue("bob sees the change once", bob.e2ee.peerState("alice").keyChanged)
+        assertTrue("bob sees the change", bob.e2ee.peerState("alice").keyChanged)
+        assertTrue("until the notice is closed", bob.e2ee.peerState("alice").keyChanged)
+        bob.e2ee.keyChangeSeen("alice")
+        assertFalse(bob.e2ee.peerState("alice").keyChanged)
     }
 
     @Test

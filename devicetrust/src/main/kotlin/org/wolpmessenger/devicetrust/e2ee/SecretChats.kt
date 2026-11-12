@@ -181,31 +181,45 @@ internal class SecretChats(
         store.save(state)
     }
 
-    /** The peer's state for the web app; reading it takes the "key changed" mark off (FR-014). */
+    /** The peer's state for the web app. The "key changed" mark stays until [keyChangeSeen] (FR-014). */
     suspend fun peerState(peer: String): Pair<PeerTrust, Boolean> = mutex.withLock {
         val state = store.peer(store.account(), peer)
-        val changed = state.changed
-        if (changed) {
+        state.trust to state.changed
+    }
+
+    /** The user was shown that the peer's key changed and closed the notice. */
+    suspend fun keyChangeSeen(peer: String): Unit = mutex.withLock {
+        val state = store.peer(store.account(), peer)
+        if (state.changed) {
             state.changed = false
             store.save(state)
         }
-        state.trust to changed
     }
 
     /** 60 digits to compare with the peer (FR-016), or null while no key of the peer is accepted. */
     suspend fun safetyNumber(peer: String): String? = mutex.withLock {
         val account = store.account()
-        val theirs = store.peer(account, peer).identity ?: return@withLock null
+        store.peer(account, peer).identity?.let { number(account, peer, it) }
+    }
+
+    private fun number(account: Account, peer: String, theirs: ByteArray): String =
         NumericFingerprintGenerator(5200)
             .createFor(2, me.toByteArray(), account.identity.publicKey, peer.toByteArray(), IdentityKey(theirs))
             .displayableFingerprint.displayText
-    }
 
-    /** The user compared the safety number ([verified]) or drops the mark; both end `REVERIFY`. */
-    suspend fun setVerified(peer: String, verified: Boolean): Unit = mutex.withLock {
-        val state = store.peer(store.account(), peer)
-        if (state.identity == null || state.trust == PeerTrust.UNVERIFIED) return@withLock
+    /**
+     * The user compared the safety number ([verified]) or drops the mark; both end `REVERIFY` and
+     * take the "key changed" mark off. The mark goes to the key whose number was on the screen:
+     * [safetyNumber] is that number, and when the key has changed since, the answer is `reverify`.
+     */
+    suspend fun setVerified(peer: String, verified: Boolean, safetyNumber: String?): Unit = mutex.withLock {
+        val account = store.account()
+        val state = store.peer(account, peer)
+        val theirs = state.identity
+        if (theirs == null || state.trust == PeerTrust.UNVERIFIED) return@withLock
+        if (verified && safetyNumber?.filter(Char::isDigit) != number(account, peer, theirs)) throw E2eeException(E2eeFailure.REVERIFY)
         state.trust = if (verified) PeerTrust.VERIFIED else PeerTrust.PASSPORT
+        state.changed = false
         store.save(state)
     }
 
