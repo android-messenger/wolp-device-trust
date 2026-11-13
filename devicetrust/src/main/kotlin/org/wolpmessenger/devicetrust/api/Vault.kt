@@ -9,7 +9,7 @@ public enum class VaultPurpose(public val tag: String) {
     E2EE("e2ee"),
     E2EE_PLAINTEXT("e2ee-plaintext"),
 
-    /** The key of what the web client caches on disk: chat history, attachments, drafts, lists. Same half as E2EE. */
+    /** The text the web client caches on disk: chat history, the send queue, drafts, lists, names — one blob per record. Same half as E2EE. */
     CHAT_CACHE("chat-cache"),
     NAMES("names"),
     PUSH_KEY("push-key"),
