@@ -2,12 +2,15 @@ package org.wolpmessenger.devicetrust.api
 
 /**
  * What a Vault blob protects. The tag is bound into the AEAD associated data, so a blob
- * wrapped for one purpose never unwraps for another (S2 §9). From JS (S1) only [E2EE] and
- * [E2EE_PLAINTEXT] are reachable — the plugin enforces that.
+ * wrapped for one purpose never unwraps for another (S2 §9). From JS (S1) only [E2EE_PLAINTEXT]
+ * and [CHAT_CACHE] are reachable — the plugin enforces that.
  */
 public enum class VaultPurpose(public val tag: String) {
     E2EE("e2ee"),
     E2EE_PLAINTEXT("e2ee-plaintext"),
+
+    /** The key of what the web client caches on disk: chat history, attachments, drafts, lists. Same half as E2EE. */
+    CHAT_CACHE("chat-cache"),
     NAMES("names"),
     PUSH_KEY("push-key"),
 }

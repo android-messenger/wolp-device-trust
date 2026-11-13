@@ -112,6 +112,7 @@ class VaultTest {
         val v = vault().apply { provision() }
         val blob = v.wrap("secret".toByteArray(), VaultPurpose.E2EE, "a".toByteArray())
         assertVault<VaultException.Corrupt> { v.unwrap(blob, VaultPurpose.E2EE_PLAINTEXT, "a".toByteArray()) }
+        assertVault<VaultException.Corrupt> { v.unwrap(blob, VaultPurpose.CHAT_CACHE, "a".toByteArray()) }
         assertVault<VaultException.Corrupt> { v.unwrap(blob, VaultPurpose.E2EE, "b".toByteArray()) }
         assertVault<VaultException.Corrupt> { v.unwrap(blob, VaultPurpose.E2EE) }
         for (i in listOf(0, 1, 12, 13, blob.size - 1)) {
@@ -256,6 +257,7 @@ class VaultTest {
         v.evictUnlockedKey() // what screen-off does
         assertVault<VaultException.Locked> { v.unwrap(secret, VaultPurpose.E2EE) }
         assertVault<VaultException.Locked> { v.wrap(byteArrayOf(1), VaultPurpose.E2EE_PLAINTEXT) }
+        assertVault<VaultException.Locked> { v.wrap(byteArrayOf(1), VaultPurpose.CHAT_CACHE) }
         assertArrayEquals("push".toByteArray(), v.unwrap(push, VaultPurpose.PUSH_KEY))
         assertArrayEquals("n".toByteArray(), v.unwrap(v.wrap("n".toByteArray(), VaultPurpose.NAMES), VaultPurpose.NAMES))
 

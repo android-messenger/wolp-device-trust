@@ -32,7 +32,7 @@ public enum class VaultKeys { PRESENT, MISSING, PARTIAL }
  * | half       | purposes               | KEK          | DEK file    | available                         |
  * |------------|------------------------|--------------|-------------|-----------------------------------|
  * | background | `NAMES`, `PUSH_KEY`    | `dt.vault`   | `dek.bin`   | after the first unlock since boot |
- * | E2EE       | `E2EE`, `E2EE_PLAINTEXT` | `dt.vault.u` | `dek-u.bin` | only while the device is unlocked |
+ * | E2EE       | `E2EE`, `E2EE_PLAINTEXT`, `CHAT_CACHE` | `dt.vault.u` | `dek-u.bin` | only while the device is unlocked |
  *
  * The E2EE KEK is refused by the system Keystore while the device is locked, the E2EE DEK leaves
  * memory at screen-off, and a device whose screen lock was removed loses the E2EE half for good.
@@ -202,7 +202,7 @@ public class EnvelopeVault internal constructor(
 
     private suspend fun dekFor(purpose: VaultPurpose): ByteArray {
         gate()
-        val e2ee = purpose == VaultPurpose.E2EE || purpose == VaultPurpose.E2EE_PLAINTEXT
+        val e2ee = purpose == VaultPurpose.E2EE || purpose == VaultPurpose.E2EE_PLAINTEXT || purpose == VaultPurpose.CHAT_CACHE
         if (e2ee && twoKeys && !legacy()) {
             boundDek?.let { return it }
             return loadMutex.withLock { boundDek ?: loadBoundDek().also { boundDek = it } }
