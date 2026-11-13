@@ -17,6 +17,7 @@ import org.wolpmessenger.devicetrust.api.ClientCredentials
 import org.wolpmessenger.devicetrust.api.DenySource
 import org.wolpmessenger.devicetrust.api.GatewayCode
 import org.wolpmessenger.devicetrust.api.SessionBinding
+import org.wolpmessenger.devicetrust.api.SignedOutNotice
 import org.wolpmessenger.devicetrust.api.DeviceSecurityInfo
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
 import org.wolpmessenger.devicetrust.api.EnrollResult
@@ -201,6 +202,10 @@ internal class DeviceTrustCore(
             is GatewayResult.Failed -> SessionBinding.Failed(BindingFailure.NETWORK)
         }
     }
+
+    /** `POST /v1/device/signed-out`, signed by the device key (docs specs F5, part 2). */
+    suspend fun reportSignedOut(): SignedOutNotice =
+        withContext(Dispatchers.IO) { sender?.signedOut() ?: SignedOutNotice.RETRY }
 
     /** One pass of the alert sender; returns the number of messages still waiting. */
     fun sendAlerts(): Int = sender?.sendAll() ?: 0

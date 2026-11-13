@@ -62,6 +62,36 @@ internal class Alerts(
     /** Batches pending REPORT findings into signed messages; called by the sender before sending. */
     fun drainReports() = queue.drainReports(now()) { batch -> build(AlertKind.REPORT, batch) }
 
+    /**
+     * The message of `POST /v1/device/signed-out` (docs specs F5, part 2):
+     * `{"v":1,"kind":"SIGNED_OUT","deviceId","certSerial","ts"}` signed by the device key, as the
+     * request body. Built and signed at the moment it is sent — the gateway takes it for 10 minutes
+     * and once — so it never goes through the queue. Null without a usable device key.
+     */
+    fun signedOut(): ByteArray? {
+        val s = store.load()
+        val active = s.active ?: return null
+        val deviceId = s.deviceId ?: return null
+        val payload = JSONObject()
+            .put("v", 1)
+            .put("kind", "SIGNED_OUT")
+            .put("deviceId", deviceId)
+            .put("certSerial", active.serialHex)
+            .put("ts", now().truncatedTo(ChronoUnit.SECONDS).toString())
+            .toString().toByteArray()
+        val sig = try {
+            Signature.getInstance("SHA256withECDSA").run { initSign(keys.privateKey(active.alias)); update(payload); sign() }
+        } catch (e: Exception) {
+            return null // the key is gone or unusable
+        }
+        val b64 = java.util.Base64.getEncoder()
+        return JSONObject()
+            .put("payload", b64.encodeToString(payload))
+            .put("sig", b64.encodeToString(sig))
+            .put("certSerial", active.serialHex)
+            .toString().toByteArray()
+    }
+
     private fun build(kind: AlertKind, checks: List<RaspFinding>): Triple<ByteArray, ByteArray?, String?> {
         val s = store.load()
         val active = s.active
