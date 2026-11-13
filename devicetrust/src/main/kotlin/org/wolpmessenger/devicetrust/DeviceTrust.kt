@@ -33,6 +33,7 @@ import org.wolpmessenger.devicetrust.api.ClientCredentials
 import org.wolpmessenger.devicetrust.api.DenySource
 import org.wolpmessenger.devicetrust.api.GatewayCode
 import org.wolpmessenger.devicetrust.api.SessionBinding
+import org.wolpmessenger.devicetrust.api.SignedOutNotice
 import org.wolpmessenger.devicetrust.api.DeviceSecurityInfo
 import org.wolpmessenger.devicetrust.api.DeviceTrustConfig
 import org.wolpmessenger.devicetrust.api.E2ee
@@ -306,6 +307,16 @@ public object DeviceTrust {
      * a device key a signed `UNENROLL` is queued first and delivered in the background.
      */
     public suspend fun unenroll(): UnenrollResult = io { unenroll() }
+
+    /**
+     * Tells the gateway that the user signed out when the app could not tell the server itself
+     * (a sign-out without the network: the session cookie is erased, so nothing else can).
+     * The library builds and signs the message with the device key; the gateway then has the push
+     * service drop this device's token and the key directory the record it published. The device
+     * stays enrolled. One attempt: call again while the answer is [SignedOutNotice.RETRY], and
+     * stop once the user has signed in again.
+     */
+    public suspend fun reportSignedOut(): SignedOutNotice = io { reportSignedOut() }
 
     /**
      * One RASP pass now (S2 §7). Runs by itself at init, on coming to the foreground and every

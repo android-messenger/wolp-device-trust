@@ -107,6 +107,10 @@ internal class GatewayClient(
     fun alert(body: ByteArray, cookie: String?): GatewayResult<Unit> =
         call(pinned, post(enrollBase, "/v1/device/alert", body).apply { cookie?.let { header("Cookie", it) } }) { }
 
+    /** `202` → Ok. Signed by the device key; no cookie, no client certificate (docs specs F5, part 2). */
+    fun signedOut(body: ByteArray): GatewayResult<Unit> =
+        call(pinned, post(enrollBase, "/v1/device/signed-out", body)) { }
+
     // --- app host, mTLS with the current certificate: DeviceTrust.okHttpClient() (S3 §5.8a, §5.8c) ---
 
     /** `204` → Ok(true if `X-Device-Renew: 1`). No Kratos session needed. */

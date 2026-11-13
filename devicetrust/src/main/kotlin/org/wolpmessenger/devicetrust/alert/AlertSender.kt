@@ -11,6 +11,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import org.wolpmessenger.devicetrust.DeviceTrust
 import org.wolpmessenger.devicetrust.Journal
+import org.wolpmessenger.devicetrust.api.SignedOutNotice
 import org.wolpmessenger.devicetrust.net.GatewayClient
 import org.wolpmessenger.devicetrust.net.GatewayResult
 import java.time.Duration
@@ -54,6 +55,24 @@ internal class AlertSender(
             }
         }
         return queue.list().size
+    }
+
+    /**
+     * Tells the gateway that the user signed out (docs specs F5, part 2); one attempt, no queue:
+     * the caller repeats it while the answer is [SignedOutNotice.RETRY].
+     */
+    fun signedOut(): SignedOutNotice {
+        val body = alerts.signedOut() ?: return SignedOutNotice.NOT_NEEDED
+        val notice = when (val r = gateway.signedOut(body)) {
+            is GatewayResult.Ok -> SignedOutNotice.DELIVERED
+            is GatewayResult.Refused -> when (r.error.httpStatus) {
+                400, 404 -> SignedOutNotice.UNSUPPORTED
+                else -> SignedOutNotice.RETRY
+            }
+            is GatewayResult.Failed -> SignedOutNotice.RETRY
+        }
+        Journal.event("signed_out_notice", notice.name)
+        return notice
     }
 
     internal companion object {

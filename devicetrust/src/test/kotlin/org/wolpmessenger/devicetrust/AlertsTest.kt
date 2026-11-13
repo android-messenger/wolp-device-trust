@@ -28,6 +28,7 @@ import org.wolpmessenger.devicetrust.api.RaspReaction
 import org.wolpmessenger.devicetrust.api.RaspReport
 import org.wolpmessenger.devicetrust.api.ReportLimit
 import org.wolpmessenger.devicetrust.api.ServerNotice
+import org.wolpmessenger.devicetrust.api.SignedOutNotice
 import org.wolpmessenger.devicetrust.api.TrustEvent
 import org.wolpmessenger.devicetrust.api.TrustState
 import org.wolpmessenger.devicetrust.api.UnenrollResult
@@ -283,6 +284,70 @@ class AlertsTest {
     fun `UNENROLL is never queued unsigned`() {
         assertFalse(alerts.enqueue(AlertKind.UNENROLL))
         assertTrue(queue.isEmpty())
+    }
+
+    // --- sign-out the server did not hear about (docs specs F5, part 2) ---
+
+    @Test
+    fun `signed-out - a fresh message signed by the device key, no cookie, the device stays enrolled`() = runTest {
+        enrolledWithK1()
+        cookie = "ory_kratos_session=s"
+        server.enqueue(accepted())
+        assertEquals(SignedOutNotice.DELIVERED, core.reportSignedOut())
+
+        val r = take()
+        assertEquals("/v1/device/signed-out", r.path)
+        assertNull("the signature is the only credential", r.getHeader("Cookie"))
+        val body = JSONObject(r.body.readUtf8())
+        val raw = Base64.getDecoder().decode(body.getString("payload"))
+        val ok = Signature.getInstance("SHA256withECDSA").run {
+            initVerify(backend.pairs.getValue(k1.alias).public); update(raw); verify(Base64.getDecoder().decode(body.getString("sig")))
+        }
+        assertTrue("signature over the exact payload bytes", ok)
+        assertEquals(k1.serialHex, body.getString("certSerial"))
+        val p = JSONObject(String(raw))
+        assertEquals(setOf("v", "kind", "deviceId", "certSerial", "ts"), p.keys().asSequence().toSet())
+        assertEquals(1, p.getInt("v"))
+        assertEquals("SIGNED_OUT", p.getString("kind"))
+        assertEquals("01JDEVICE", p.getString("deviceId"))
+        assertEquals(k1.serialHex, p.getString("certSerial"))
+        assertEquals(t0, Instant.parse(p.getString("ts")))
+
+        assertEquals(Phase.ENROLLED, store.load().phase)
+        assertEquals(setOf(k1.alias), backend.aliases().toSet())
+        assertTrue("nothing is queued: the message is good for minutes only", queue.isEmpty())
+
+        // every attempt is signed anew, with the time of that attempt
+        clock.set(t0.plusSeconds(3600))
+        server.enqueue(accepted())
+        assertEquals(SignedOutNotice.DELIVERED, core.reportSignedOut())
+        val again = JSONObject(String(Base64.getDecoder().decode(JSONObject(take().body.readUtf8()).getString("payload"))))
+        assertEquals(t0.plusSeconds(3600), Instant.parse(again.getString("ts")))
+    }
+
+    @Test
+    fun `signed-out - 404 and 400 end the cleanup, anything else asks for another try`() = runTest {
+        enrolledWithK1()
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)) // first: it acts on a new connection only
+        assertEquals("no network", SignedOutNotice.RETRY, core.reportSignedOut())
+        server.enqueue(MockResponse().setResponseCode(404))
+        assertEquals(SignedOutNotice.UNSUPPORTED, core.reportSignedOut())
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":"BAD_REQUEST"}"""))
+        assertEquals(SignedOutNotice.UNSUPPORTED, core.reportSignedOut())
+        for (code in listOf(429, 500, 503)) {
+            server.enqueue(MockResponse().setResponseCode(code))
+            assertEquals("HTTP $code", SignedOutNotice.RETRY, core.reportSignedOut())
+        }
+        assertTrue(SignedOutNotice.DELIVERED.done && SignedOutNotice.UNSUPPORTED.done && SignedOutNotice.NOT_NEEDED.done)
+        assertFalse(SignedOutNotice.RETRY.done)
+    }
+
+    @Test
+    fun `signed-out - without a device key nothing is sent`() = runTest {
+        assertEquals("not enrolled", SignedOutNotice.NOT_NEEDED, core.reportSignedOut())
+        store.save(StoredState(phase = Phase.ENROLLED, deviceId = "01JDEVICE", active = k1)) // the key is not in the keystore
+        assertEquals("key lost", SignedOutNotice.NOT_NEEDED, core.reportSignedOut())
+        assertEquals(0, server.requestCount)
     }
 
     @Test
